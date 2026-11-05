@@ -363,3 +363,7 @@ percentages, snippet placeholders, Raycast metadata, browser history files,
 KWin scripts and theme palettes with fixed inputs; serve a fake app menu over
 D-Bus; and run the expansion helper in a test mode that reads key
 events from standard input instead of keyboards.
+
+## License
+
+GPL-3.0-or-later: see [LICENSE](LICENSE). The KDE protocol files in `protocols/` keep their own licence (LGPL-2.1-or-later), as stated in each file.
