@@ -25,10 +25,12 @@ public:
 private:
     QList<Item> commands() const;
     QList<Item> quickLinkItems(const QString &text) const;
+    void createQuickLink();
     Action askAction(const Library::QuickLink &link, const QStringList &initial) const;
     static QString argumentNames(const QList<Argument> &arguments);
 
     Library *m_library;
+    QString m_lastQuery; // to show icons once they arrive
 };
 
 // The "Search Snippets" view.

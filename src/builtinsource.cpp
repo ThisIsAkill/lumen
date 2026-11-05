@@ -5,11 +5,15 @@
 #include "library.h"
 #include "noteswindow.h"
 #include "pastestack.h"
+#include "browserhistory.h"
+#include "favicons.h"
 #include "windowtiling.h"
 
 #include <KIO/OpenUrlJob>
 
 #include <QLocale>
+#include <QRegularExpression>
+#include <QUrl>
 
 #include <algorithm>
 
@@ -25,10 +29,12 @@ qreal bestScore(const QString &query, const QStringList &texts)
     return best;
 }
 
-void openUrl(const QUrl &url)
+// A quick link's icon: the site's own once fetched, a folder for paths.
+QIcon linkIcon(const Library::QuickLink &link)
 {
-    auto *job = new KIO::OpenUrlJob(url);
-    job->start();
+    if (link.target.startsWith(u'~') || link.target.startsWith(u'/'))
+        return QIcon::fromTheme(QStringLiteral("folder"));
+    return Favicons::instance()->iconFor(link.target, QIcon::fromTheme(QStringLiteral("internet-web-browser")));
 }
 
 } // namespace
@@ -37,11 +43,56 @@ BuiltinSource::BuiltinSource(Launcher *launcher, Library *library)
     : Source(launcher)
     , m_library(library)
 {
+    // A site's icon arrived: show it.
+    connect(Favicons::instance(), &Favicons::changed, this, [this] {
+        if (!m_lastQuery.isEmpty())
+            query(m_lastQuery);
+    });
+}
+
+void BuiltinSource::createQuickLink()
+{
+    // Filled in from a copied address, or else the page visited last
+    // (most likely the one open in the browser).
+    Launcher *l = launcher();
+    QString url = l->recentClipboardText(0).trimmed();
+    QString title;
+    if (!url.startsWith(QLatin1String("http://")) && !url.startsWith(QLatin1String("https://"))) {
+        url.clear();
+        if (!BrowserHistory::visits().isEmpty()) {
+            url = BrowserHistory::visits().first().url;
+            title = BrowserHistory::visits().first().title;
+        }
+    }
+    if (title.isEmpty() && !url.isEmpty())
+        title = QUrl(url).host().remove(QRegularExpression(QStringLiteral("^www\\.")));
+    Argument name, keyword, target;
+    name.name = QStringLiteral("name");
+    name.placeholder = tr("Name");
+    keyword.name = QStringLiteral("keyword");
+    keyword.placeholder = tr("Keyword");
+    keyword.optional = true;
+    target.name = QStringLiteral("url");
+    target.placeholder = tr("URL ({query} for a search)");
+    Item shown;
+    shown.title = tr("Create Quick Link");
+    shown.subtitle = tr("Put {query} where the search words go: https://example.com/search?q={query}");
+    shown.icon = QIcon::fromTheme(QStringLiteral("bookmark-new"));
+    Library *library = m_library;
+    l->askArguments(shown, {name, keyword, target}, {title.left(60), {}, url}, [l, library](const QStringList &values) {
+        QList<Library::QuickLink> links = library->quickLinks();
+        links.removeIf([&](const Library::QuickLink &x) { return x.name.compare(values.at(0), Qt::CaseInsensitive) == 0; });
+        links << Library::QuickLink{values.at(0).trimmed(), values.at(1).trimmed(), values.at(2).trimmed(), {}};
+        library->setQuickLinks(links);
+        l->notify(values.at(1).trimmed().isEmpty() ? tr("Saved “%1”").arg(values.at(0)) : tr("Type “%1” for %2").arg(values.at(1).trimmed(), values.at(0)));
+    });
 }
 
 QList<Item> BuiltinSource::commands() const
 {
     Launcher *l = launcher();
+    auto self = const_cast<BuiltinSource *>(this);
+    Library *library = m_library;
     auto command = [](const QString &id, const QString &title, const QString &subtitle, const QString &icon, const Action &primary) {
         Item item;
         item.id = QStringLiteral("lumen:") + id;
@@ -97,8 +148,13 @@ QList<Item> BuiltinSource::commands() const
                 {tr("Open"), {}, {}, [l] { l->openView(Launcher::FilesView); }, true}),
         command(QStringLiteral("new-snippet"), tr("Create Snippet"), tr("Save text you type often"), QStringLiteral("list-add"),
                 {tr("Open"), {}, {}, [l] { l->openSettings(Launcher::SnippetsTab, true); }}),
-        command(QStringLiteral("new-link"), tr("Create Quick Link"), tr("Open a site, search or folder by keyword"),
-                QStringLiteral("bookmark-new"), {tr("Open"), {}, {}, [l] { l->openSettings(Launcher::QuickLinksTab, true); }}),
+        command(QStringLiteral("new-link"), tr("Create Quick Link"), tr("From the copied address, or the page you are on"),
+                QStringLiteral("bookmark-new"), {tr("Create"), {}, {}, [self] { self->createQuickLink(); }, true}),
+        command(QStringLiteral("ready-links"), tr("Add Ready-Made Quick Links"), tr("YouTube, Maps, Wikipedia, Reddit, Stack Overflow, the Arch Wiki…"),
+                QStringLiteral("bookmarks"), {tr("Add"), {}, {}, [l, library] {
+                    const int added = library->addReadyMadeLinks();
+                    l->notify(added ? tr("Added %1 quick links").arg(added) : tr("You have them all already"));
+                }, true}),
         command(QStringLiteral("new-command"), tr("Create Command"), tr("Run a shell command or script from Lumen"),
                 QStringLiteral("utilities-terminal"), {tr("Open"), {}, {}, [l] { l->openSettings(Launcher::CommandsTab, true); }}),
         command(QStringLiteral("settings"), tr("Lumen Settings"), tr("Shortcut, snippets, quick links, clipboard"),
@@ -174,11 +230,11 @@ Action BuiltinSource::askAction(const Library::QuickLink &link, const QStringLis
     Item shown;
     shown.title = link.name;
     shown.subtitle = link.target;
-    shown.icon = QIcon::fromTheme(QStringLiteral("internet-web-browser"));
+    shown.icon = linkIcon(link);
     Action ask{tr("Enter %1").arg(argumentNames(link.arguments())), {}, {}, [l, link, shown, initial] {
         const QList<Argument> arguments = link.arguments();
         l->askArguments(shown, arguments, initial, [l, link, arguments](const QStringList &values) {
-            openUrl(Library::resolve(link, Arguments::byName(arguments, values)));
+            Library::open(link, Library::resolve(link, Arguments::byName(arguments, values)));
             l->hideLauncher();
         });
     }, true};
@@ -203,11 +259,11 @@ QList<Item> BuiltinSource::fallbackItems(const QString &text) const
         item.id = QStringLiteral("link:") + link.name;
         item.title = tr("Search %1 for “%2”").arg(link.name, text);
         item.kind = tr("Quick Link");
-        item.icon = QIcon::fromTheme(QStringLiteral("internet-web-browser"));
+        item.icon = linkIcon(link);
         if (link.arguments().size() > 1)
             item.actions << askAction(link, {text});
         else
-            item.actions << Action{tr("Open"), {}, {}, [link, text] { openUrl(Library::resolve(link, text)); }};
+            item.actions << Action{tr("Open"), {}, {}, [link, text] { Library::open(link, Library::resolve(link, text)); }};
         items << item;
     }
     return items;
@@ -221,8 +277,7 @@ QList<Item> BuiltinSource::quickLinkItems(const QString &text) const
     const QString argument = text.section(u' ', 1).trimmed();
     for (const Library::QuickLink &link : m_library->quickLinks()) {
         Item item;
-        item.icon = QIcon::fromTheme(link.target.startsWith(u'~') || link.target.startsWith(u'/') ? QStringLiteral("folder")
-                                                                                                    : QStringLiteral("internet-web-browser"));
+        item.icon = linkIcon(link);
         item.kind = link.keyword.isEmpty() ? tr("Quick Link") : tr("Quick Link · %1").arg(link.keyword);
         item.id = QStringLiteral("link:") + link.name;
 
@@ -238,7 +293,7 @@ QList<Item> BuiltinSource::quickLinkItems(const QString &text) const
             } else if (argument.isEmpty()) {
                 item.actions << Action{tr("Open"), {}, {}, [] { }, true};
             } else {
-                item.actions << Action{tr("Open"), {}, {}, [link, argument] { openUrl(Library::resolve(link, argument)); }};
+                item.actions << Action{tr("Open"), {}, {}, [link, argument] { Library::open(link, Library::resolve(link, argument)); }};
             }
             items << item;
             continue;
@@ -256,7 +311,7 @@ QList<Item> BuiltinSource::quickLinkItems(const QString &text) const
             const QString prefix = link.keyword + u' ';
             item.actions << Action{tr("Search %1").arg(link.name), {}, {}, [l, prefix] { l->setQuery(prefix); }, true};
         } else {
-            item.actions << Action{tr("Open"), {}, {}, [link] { openUrl(Library::resolve(link, QString())); }};
+            item.actions << Action{tr("Open"), {}, {}, [link] { Library::open(link, Library::resolve(link, QString())); }};
         }
         item.actions << Action{tr("Edit Quick Links"), QStringLiteral("document-edit"), QKeySequence(Qt::CTRL | Qt::Key_E),
                                [l] { l->openSettings(Launcher::QuickLinksTab, false); }};
@@ -267,6 +322,7 @@ QList<Item> BuiltinSource::quickLinkItems(const QString &text) const
 
 void BuiltinSource::query(const QString &text)
 {
+    m_lastQuery = text;
     const QString q = text.trimmed();
     QList<Item> items;
     if (!q.isEmpty()) {

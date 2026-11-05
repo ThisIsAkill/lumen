@@ -1,4 +1,5 @@
 #include "launcher.h"
+#include "aichat.h"
 #include "answersource.h"
 #include "apphotkeys.h"
 #include "appquit.h"
@@ -865,7 +866,8 @@ Launcher::Launcher()
     m_calendar = new CalendarSource(this);
     m_focus = new FocusMode(this, m_timekeeper);
     m_awake = new KeepAwake(this);
-    m_rootSources = {new KRunnerSource(this), m_builtin, new AnswerSource(this), m_system, new ScriptSource(this, m_library), new ScriptCommandSource(this), new WindowLayoutSource(this, m_library), m_focus, new BrowserHistory(this, false), new PackageRootSource(this), new AppQuitSource(this, false), m_awake, new LanguageSource(this), new NetworkSource(this), new DisplaySource(this), new PhoneSource(this), new AppSource(this), m_time, m_calendar, new WeatherSource(this), new DevSource(this), new ProjectSource(this), new DesktopSource(this), new ScreenTools(this), new MonitorSource(this)};
+    m_ai = new AiChat(this);
+    m_rootSources = {new KRunnerSource(this), m_builtin, new AnswerSource(this), m_system, new ScriptSource(this, m_library), new ScriptCommandSource(this), new WindowLayoutSource(this, m_library), m_focus, new BrowserHistory(this, false), new PackageRootSource(this), new AppQuitSource(this, false), m_awake, new AiRootSource(this, m_ai), new LanguageSource(this), new NetworkSource(this), new DisplaySource(this), new PhoneSource(this), new AppSource(this), m_time, m_calendar, new WeatherSource(this), new DevSource(this), new ProjectSource(this), new DesktopSource(this), new ScreenTools(this), new MonitorSource(this)};
     m_pasteStack = new PasteStack(this, m_clipboard);
     m_views = {
         {PasteStackView, new PasteStackSource(this, m_pasteStack)},
@@ -876,6 +878,7 @@ Launcher::Launcher()
         {ThemeView, new ThemeSource(this)},
         {PackagesView, new PackageSource(this, new PackageManager(this))},
         {AppsView, new AppQuitSource(this, true)},
+        {AiChatView, new AiChatSource(this, m_ai)},
         {ClipboardView, new ClipboardSource(this, m_clipboard)},
         {FilesView, new FileSource(this)},
         {SnippetsView, new SnippetsSource(this, m_builtin)},
@@ -1058,6 +1061,7 @@ void Launcher::setupShortcut()
         {QStringLiteral("windows"), tr("Switch Window")},
         {QStringLiteral("menu"), tr("Search Menu Items")},
         {QStringLiteral("tabs"), tr("Search Browser Tabs")},
+        {QStringLiteral("ai"), tr("AI Chat")},
         {QStringLiteral("notes"), tr("Notes")},
     };
     for (const auto &[name, text] : views) {
@@ -1096,6 +1100,7 @@ bool Launcher::showView(const QString &name, const QString &query)
         {QStringLiteral("theme"), ThemeView},
         {QStringLiteral("packages"), PackagesView},
         {QStringLiteral("apps"), AppsView},
+        {QStringLiteral("ai"), AiChatView},
     };
     if (!names.contains(name))
         return false;

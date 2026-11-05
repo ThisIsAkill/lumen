@@ -43,6 +43,8 @@ add_library(lumen-core STATIC
     src/network.cpp
     src/keepawake.cpp
     src/devices.cpp
+    src/favicons.cpp
+    src/aichat.cpp
     src/outputview.cpp
     src/scriptcommands.cpp
     src/resultview.cpp

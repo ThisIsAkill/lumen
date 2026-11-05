@@ -61,7 +61,7 @@ class Launcher : public QWidget
 {
     Q_OBJECT
 public:
-    enum View { RootView, ClipboardView, FilesView, SnippetsView, EmojiView, WindowsView, TransformView, ProcessesView, DownloadsView, PasteStackView, MenusView, TabsView, HistoryView, CalculationsView, ThemeView, PackagesView, AppsView };
+    enum View { RootView, ClipboardView, FilesView, SnippetsView, EmojiView, WindowsView, TransformView, ProcessesView, DownloadsView, PasteStackView, MenusView, TabsView, HistoryView, CalculationsView, ThemeView, PackagesView, AppsView, AiChatView };
     enum SettingsTab { GeneralTab, SnippetsTab, QuickLinksTab, CommandsTab, CalendarTab, FocusTab };
 
     Launcher();
@@ -248,6 +248,7 @@ private:
     class PasteStack *m_pasteStack;
     class FocusMode *m_focus;
     class KeepAwake *m_awake;
+    class AiChat *m_ai;
     Expansion *m_expansion;
     AppHotkeys *m_hotkeys;
     PreviewPane *m_pane;

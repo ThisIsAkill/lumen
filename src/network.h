@@ -4,6 +4,7 @@
 
 #include <QDateTime>
 #include <QElapsedTimer>
+#include <QHash>
 #include <QJsonObject>
 #include <QPointer>
 
@@ -18,6 +19,7 @@ class QNetworkReply;
 //  - "dns example.com", "whois example.com", "ping example.com": the tool's
 //    output in a view; "flush dns";
 //  - "vpn": NetworkManager's VPN and WireGuard connections, on and off;
+//  - "shorten" (the copied address) or "shorten URL": an is.gd link, copied;
 //  - "tailscale" (or a device's name): the tailnet's devices, to copy an
 //    address, SSH in or use one as the exit node; connect and disconnect.
 class NetworkSource : public Source
@@ -52,6 +54,8 @@ private:
     void speedStep();
     void command(const QString &title, const QStringList &argv); // output in a view
     void quietly(const QStringList &argv, const QString &done, std::function<void()> then = {});
+    void shorten(const QString &url);
+    QHash<QString, QString> m_short; // long → short address, this session
 
     QNetworkAccessManager *m_network;
     QString m_query;

@@ -31,6 +31,7 @@
 #include <QListWidget>
 #include <QPainter>
 #include <QPlainTextEdit>
+#include <QProcess>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSpinBox>
@@ -222,6 +223,12 @@ void SettingsDialog::showTab(int tab, bool addNew)
         m_links->setItem(row, 0, new QTableWidgetItem(tr("New Link")));
         m_links->setItem(row, 1, new QTableWidgetItem);
         m_links->setItem(row, 2, new QTableWidgetItem(QStringLiteral("https://")));
+        auto *app = new QComboBox;
+        app->addItem(QIcon::fromTheme(QStringLiteral("internet-web-browser")), tr("Default"), QString());
+        for (const KService::Ptr &b : KApplicationTrader::queryByMimeType(QStringLiteral("x-scheme-handler/https")))
+            app->addItem(QIcon::fromTheme(b->icon()), b->name(), b->storageId());
+        connect(app, &QComboBox::currentIndexChanged, this, [this] { saveQuickLinks(); });
+        m_links->setCellWidget(row, 3, app);
         m_loadingLinks = false;
         saveQuickLinks();
         m_links->setCurrentCell(row, 0);
@@ -291,6 +298,43 @@ QWidget *SettingsDialog::generalPage()
     form->addRow(QString(), note(tr("Opened again that soon, Lumen comes back to the view and text you left (selected, so typing "
                                     "starts over). After running something it always starts afresh. Ctrl+[ and Ctrl+] go back and "
                                     "forward between views.")));
+
+    // AI: the local Ollama server and model.
+    form->addRow(heading(tr("AI")));
+    KConfigGroup ai = KSharedConfig::openConfig(QStringLiteral("lumenrc"))->group(QStringLiteral("AI"));
+    auto *server = new QLineEdit(ai.readEntry("Server", QStringLiteral("http://localhost:11434")), page);
+    auto *model = new QComboBox(page);
+    model->setEditable(true);
+    model->addItem(tr("First installed model"), QString());
+    const QString chosen = ai.readEntry("Model");
+    if (!chosen.isEmpty())
+        model->addItem(chosen, chosen);
+    model->setCurrentIndex(chosen.isEmpty() ? 0 : 1);
+    // The installed models, from Ollama.
+    auto *probe = new QProcess(page);
+    connect(probe, &QProcess::finished, page, [probe, model, chosen] {
+        probe->deleteLater();
+        for (const QString &line : QString::fromUtf8(probe->readAllStandardOutput()).split(u'\n', Qt::SkipEmptyParts).mid(1)) {
+            const QString name = line.section(u' ', 0, 0);
+            if (!name.isEmpty() && model->findData(name) < 0)
+                model->addItem(name, name);
+        }
+        model->setCurrentIndex(std::max(0, model->findData(chosen)));
+    });
+    probe->start(QStringLiteral("ollama"), {QStringLiteral("list")});
+    auto saveAi = [server, model] {
+        KConfigGroup g = KSharedConfig::openConfig(QStringLiteral("lumenrc"))->group(QStringLiteral("AI"));
+        g.writeEntry("Server", server->text().trimmed());
+        const QString data = model->currentData().toString();
+        g.writeEntry("Model", model->currentIndex() > 0 && !data.isEmpty() ? data : model->currentIndex() == 0 ? QString() : model->currentText());
+        g.sync();
+    };
+    connect(server, &QLineEdit::editingFinished, this, saveAi);
+    connect(model, &QComboBox::currentIndexChanged, this, saveAi);
+    form->addRow(tr("Ollama server:"), server);
+    form->addRow(tr("Model:"), model);
+    form->addRow(QString(), note(tr("Type “ask …” (or “? …”) for a quick answer, or open AI Chat. Everything stays on this computer: "
+                                    "the model runs in Ollama (ollama.com). Chats are kept in ~/.local/share/lumen/ai-chats.json.")));
 
     form->addRow(heading(tr("Pasting")));
     auto *paste = new QCheckBox(tr("Enter pastes clipboard items and snippets into the app you were using"), page);
@@ -573,18 +617,11 @@ void SettingsDialog::saveSnippets()
 QWidget *SettingsDialog::quickLinksPage()
 {
     auto *page = new QWidget;
-    m_links = new QTableWidget(0, 3, page);
-    m_links->setHorizontalHeaderLabels({tr("Name"), tr("Keyword"), tr("URL or folder")});
+    m_links = new QTableWidget(0, 4, page);
+    m_links->setHorizontalHeaderLabels({tr("Name"), tr("Keyword"), tr("URL or folder"), tr("Open with")});
     styleTable(m_links, 2);
-    m_loadingLinks = true;
-    for (const Library::QuickLink &l : m_library->quickLinks()) {
-        const int row = m_links->rowCount();
-        m_links->insertRow(row);
-        m_links->setItem(row, 0, new QTableWidgetItem(l.name));
-        m_links->setItem(row, 1, new QTableWidgetItem(l.keyword));
-        m_links->setItem(row, 2, new QTableWidgetItem(l.target));
-    }
-    m_loadingLinks = false;
+    m_links->setColumnWidth(3, 170);
+    fillQuickLinks();
     connect(m_links, &QTableWidget::itemChanged, this, [this] {
         if (!m_loadingLinks)
             saveQuickLinks();
@@ -592,6 +629,7 @@ QWidget *SettingsDialog::quickLinksPage()
 
     auto *add = new QPushButton(QIcon::fromTheme(QStringLiteral("list-add")), tr("Add"), page);
     auto *remove = new QPushButton(QIcon::fromTheme(QStringLiteral("list-remove")), tr("Remove"), page);
+    auto *ready = new QPushButton(QIcon::fromTheme(QStringLiteral("bookmarks")), tr("Add Ready-Made Links"), page);
     connect(add, &QPushButton::clicked, this, [this] { showTab(Launcher::QuickLinksTab, true); });
     connect(remove, &QPushButton::clicked, this, [this] {
         if (m_links->currentRow() >= 0) {
@@ -599,14 +637,42 @@ QWidget *SettingsDialog::quickLinksPage()
             saveQuickLinks();
         }
     });
+    connect(ready, &QPushButton::clicked, this, [this] {
+        m_library->addReadyMadeLinks();
+        fillQuickLinks();
+    });
     auto *layout = new QVBoxLayout(page);
     layout->setContentsMargins(PageMargin, PageMargin - 4, PageMargin, PageMargin);
     layout->setSpacing(8);
     layout->addWidget(m_links, 1);
-    layout->addLayout(buttonRow(add, remove));
+    layout->addLayout(buttonRow(add, remove, ready));
     layout->addWidget(note(tr("Put {query} in a URL to search with it: with keyword “gh”, typing “gh qt layer shell” "
                               "searches GitHub. Links without {query}, and folders like ~/Downloads, open directly.")));
     return page;
+}
+
+// The table from the library; "Open with" offers the default and every
+// installed browser (and other apps that open web pages).
+void SettingsDialog::fillQuickLinks()
+{
+    m_loadingLinks = true;
+    m_links->setRowCount(0);
+    const KService::List browsers = KApplicationTrader::queryByMimeType(QStringLiteral("x-scheme-handler/https"));
+    for (const Library::QuickLink &l : m_library->quickLinks()) {
+        const int row = m_links->rowCount();
+        m_links->insertRow(row);
+        m_links->setItem(row, 0, new QTableWidgetItem(l.name));
+        m_links->setItem(row, 1, new QTableWidgetItem(l.keyword));
+        m_links->setItem(row, 2, new QTableWidgetItem(l.target));
+        auto *app = new QComboBox;
+        app->addItem(QIcon::fromTheme(QStringLiteral("internet-web-browser")), tr("Default"), QString());
+        for (const KService::Ptr &b : browsers)
+            app->addItem(QIcon::fromTheme(b->icon()), b->name(), b->storageId());
+        app->setCurrentIndex(std::max(0, app->findData(l.app)));
+        connect(app, &QComboBox::currentIndexChanged, this, [this] { saveQuickLinks(); });
+        m_links->setCellWidget(row, 3, app);
+    }
+    m_loadingLinks = false;
 }
 
 void SettingsDialog::saveQuickLinks()
@@ -615,7 +681,9 @@ void SettingsDialog::saveQuickLinks()
     for (int row = 0; row < m_links->rowCount(); ++row) {
         auto text = [&](int column) { return m_links->item(row, column) ? m_links->item(row, column)->text().trimmed() : QString(); };
         if (!text(0).isEmpty() && !text(2).isEmpty())
-            links << Library::QuickLink{text(0), text(1), text(2)};
+            links << Library::QuickLink{text(0), text(1), text(2),
+                                        qobject_cast<QComboBox *>(m_links->cellWidget(row, 3)) ? qobject_cast<QComboBox *>(m_links->cellWidget(row, 3))->currentData().toString()
+                                                                                                : QString()};
     }
     m_library->setQuickLinks(links);
 }

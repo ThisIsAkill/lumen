@@ -35,6 +35,7 @@ public:
         QString name;
         QString keyword; // typed before an argument: "gh qt layer shell"
         QString target;  // URL or path; {query} or {argument name="…"} are replaced by what is typed
+        QString app;     // desktop entry to open it with; empty: the default browser or app
         QList<Argument> arguments() const { return Arguments::fromTemplate(target); }
         bool takesQuery() const { return !arguments().isEmpty(); }
     };
@@ -115,6 +116,14 @@ public:
                                   const std::function<QString(int)> &clipboard = {}, const QDateTime &now = QDateTime::currentDateTime());
     // The text alone ({cursor} dropped).
     static QString expand(const QString &text) { return expandSnippet(text).text; }
+
+    // Common links (YouTube, Wikipedia, Maps, the Arch Wiki…): offered by
+    // "Add Ready-Made Links"; addReadyMadeLinks() adds those not yet there
+    // (by name or keyword) and says how many.
+    static QList<QuickLink> readyMadeLinks();
+    int addReadyMadeLinks();
+    // Opens a resolved link with its app, or the default one.
+    static void open(const QuickLink &link, const QUrl &url);
 
     // The URL a quick link opens for its arguments (by name), or for one
     // text given to its first argument.

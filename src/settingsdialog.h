@@ -42,6 +42,7 @@ private:
     void loadSnippet(int row);
     void saveSnippets();
     void saveQuickLinks();
+    void fillQuickLinks();
 
     Launcher *m_launcher;
     Library *m_library;

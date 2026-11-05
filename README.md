@@ -99,6 +99,16 @@ press **Enter**.
   apps and sites (Settings → Focus) are minimized whenever they come up,
   notifications wait (Do Not Disturb), and the countdown shows in the corner.
 
+**AI**
+- `ask …` (or `? …`) answers a question with a model running in Ollama on
+  this computer: private and free. The answer streams into the AI Chat view,
+  where typing sends a follow-up; Enter on an answer copies (or pastes) it,
+  Ctrl+Shift+C copies its code. Chats are kept; `chat` lists them.
+- **Summarize Clipboard**, **Explain Clipboard**, **Fix Spelling and Grammar**.
+- **Ask AI** is a fallback: any search can go to the model.
+- Settings → General → AI picks the server and model (the first installed
+  chat model by default); the model starts loading as soon as you type `ask`.
+
 **Words**
 - **Translate**: `translate bonjour`, `tr guten morgen`, `good night in
   japanese`, `translate thank you to korean` (Google Translate's free web
@@ -188,7 +198,14 @@ press **Enter**.
   (see *Snippet expansion* below); the trigger character is set in Settings →
   Snippets.
 - **Quick links**: open a site, search or folder by keyword: with keyword
-  `gh`, `gh layer shell` searches GitHub.
+  `gh`, `gh layer shell` searches GitHub. Each shows its site's icon, can
+  open with a chosen browser or app (Settings → Quick Links → Open with), and
+  **Create Quick Link** starts from the copied address or the page you are
+  on. **Add Ready-Made Quick Links** adds YouTube, Maps, Wikipedia, Reddit,
+  Amazon, Stack Overflow, MDN, npm, PyPI, crates.io, the Arch Wiki, AUR,
+  Flathub, ProtonDB and more.
+- **Shorten URL**: `shorten` (the copied address) or `shorten example.com/…`
+  makes an is.gd link and copies it.
 - **Custom commands** (Settings → Commands): shell commands with a name and
   keyword; `{query}` becomes the quoted text typed after the keyword. Their
   output can be ignored, shown, copied, pasted, or listed as results.
@@ -254,7 +271,7 @@ lumen --toggle            show or hide
 lumen --show TEXT         show with TEXT typed
 lumen --view NAME [TEXT]  open a view: clipboard, files, snippets, emoji, windows, notes,
                           transform, processes, downloads, paste-stack, menu, tabs,
-                          history, calculations, theme, packages, apps
+                          history, calculations, theme, packages, apps, ai
 lumen --settings          settings window
 lumen --tile left-half    move the active window (every command id: lumen --help;
                           "restore" undoes the last one)

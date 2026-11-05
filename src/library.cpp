@@ -1,6 +1,9 @@
 #include "library.h"
 
 #include <KConfigGroup>
+#include <KIO/ApplicationLauncherJob>
+#include <KIO/OpenUrlJob>
+#include <KService>
 #include <KSharedConfig>
 
 #include <QClipboard>
@@ -117,7 +120,7 @@ void Library::load()
     m_commands.clear();
     m_favourites.clear();
     m_aliases.clear();
-    m_fallbacks = {QStringLiteral("lumen:files-for")};
+    m_fallbacks = {QStringLiteral("lumen:ask-ai"), QStringLiteral("lumen:files-for")};
     m_arrangements.clear();
     QFile f(m_file);
     if (!f.open(QIODevice::ReadOnly)) {
@@ -162,7 +165,7 @@ void Library::load()
     for (const QJsonValue &v : root.value(QStringLiteral("quickLinks")).toArray()) {
         const QJsonObject o = v.toObject();
         m_links << QuickLink{o.value(QStringLiteral("name")).toString(), o.value(QStringLiteral("keyword")).toString(),
-                             o.value(QStringLiteral("target")).toString()};
+                             o.value(QStringLiteral("target")).toString(), o.value(QStringLiteral("app")).toString()};
     }
 }
 
@@ -181,8 +184,12 @@ void Library::save()
                                 {QStringLiteral("command"), c.command}, {QStringLiteral("output"), outputName(c.output)}};
     for (const Snippet &s : m_snippets)
         snippets << QJsonObject{{QStringLiteral("name"), s.name}, {QStringLiteral("keyword"), s.keyword}, {QStringLiteral("text"), s.text}};
-    for (const QuickLink &l : m_links)
-        links << QJsonObject{{QStringLiteral("name"), l.name}, {QStringLiteral("keyword"), l.keyword}, {QStringLiteral("target"), l.target}};
+    for (const QuickLink &l : m_links) {
+        QJsonObject link{{QStringLiteral("name"), l.name}, {QStringLiteral("keyword"), l.keyword}, {QStringLiteral("target"), l.target}};
+        if (!l.app.isEmpty())
+            link.insert(QStringLiteral("app"), l.app);
+        links << link;
+    }
     QDir().mkpath(QFileInfo(m_file).path());
     QSaveFile f(m_file);
     if (f.open(QIODevice::WriteOnly)) {
@@ -361,6 +368,67 @@ Library::Expanded Library::expandSnippet(const QString &text, const QHash<QStrin
     }
     result.text = out;
     return result;
+}
+
+QList<Library::QuickLink> Library::readyMadeLinks()
+{
+    auto link = [](const char *name, const char *keyword, const char *target) {
+        return QuickLink{QString::fromUtf8(name), QString::fromUtf8(keyword), QString::fromUtf8(target), {}};
+    };
+    return {
+        link("Google", "g", "https://www.google.com/search?q={query}"),
+        link("Google Images", "img", "https://www.google.com/search?tbm=isch&q={query}"),
+        link("Google Maps", "maps", "https://www.google.com/maps/search/{query}"),
+        link("YouTube", "yt", "https://www.youtube.com/results?search_query={query}"),
+        link("Wikipedia", "w", "https://en.wikipedia.org/w/index.php?search={query}"),
+        link("DuckDuckGo", "ddg", "https://duckduckgo.com/?q={query}"),
+        link("Reddit", "r", "https://www.reddit.com/search/?q={query}"),
+        link("Amazon", "amz", "https://www.amazon.ca/s?k={query}"),
+        link("GitHub", "gh", "https://github.com/search?q={query}"),
+        link("Stack Overflow", "so", "https://stackoverflow.com/search?q={query}"),
+        link("MDN", "mdn", "https://developer.mozilla.org/en-US/search?q={query}"),
+        link("npm", "npm", "https://www.npmjs.com/search?q={query}"),
+        link("PyPI", "pypi", "https://pypi.org/search/?q={query}"),
+        link("crates.io", "crates", "https://crates.io/search?q={query}"),
+        link("ArchWiki", "aw", "https://wiki.archlinux.org/index.php?search={query}"),
+        link("Arch User Repository", "aur", "https://aur.archlinux.org/packages?K={query}"),
+        link("Arch Packages", "ap", "https://archlinux.org/packages/?q={query}"),
+        link("Flathub", "fh", "https://flathub.org/apps/search?q={query}"),
+        link("ProtonDB", "pdb", "https://www.protondb.com/search?q={query}"),
+        link("KDE Store", "kstore", "https://store.kde.org/search?search={query}"),
+        link("Downloads", "dl", "~/Downloads"),
+    };
+}
+
+int Library::addReadyMadeLinks()
+{
+    QList<QuickLink> links = m_links;
+    int added = 0;
+    for (const QuickLink &ready : readyMadeLinks()) {
+        const bool taken = std::any_of(links.cbegin(), links.cend(), [&](const QuickLink &l) {
+            return l.name.compare(ready.name, Qt::CaseInsensitive) == 0 || (!ready.keyword.isEmpty() && l.keyword.compare(ready.keyword, Qt::CaseInsensitive) == 0);
+        });
+        if (!taken) {
+            links << ready;
+            ++added;
+        }
+    }
+    if (added)
+        setQuickLinks(links);
+    return added;
+}
+
+void Library::open(const QuickLink &link, const QUrl &url)
+{
+    if (!link.app.isEmpty()) {
+        if (const KService::Ptr app = KService::serviceByStorageId(link.app)) {
+            auto *job = new KIO::ApplicationLauncherJob(app);
+            job->setUrls({url});
+            job->start();
+            return;
+        }
+    }
+    (new KIO::OpenUrlJob(url))->start();
 }
 
 QUrl Library::resolve(const QuickLink &link, const QHash<QString, QString> &values)

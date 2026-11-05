@@ -182,6 +182,28 @@ void NetworkSource::quietly(const QStringList &argv, const QString &done, std::f
     proc->start(argv.first(), argv.mid(1));
 }
 
+void NetworkSource::shorten(const QString &url)
+{
+    // is.gd: free, no account; format=simple answers with the address alone.
+    // The whole address encoded, so its own "&" and "=" stay part of it.
+    const QUrl api = QUrl::fromEncoded("https://is.gd/create.php?format=simple&url=" + QUrl::toPercentEncoding(url));
+    QNetworkRequest request(api);
+    request.setTransferTimeout(8000);
+    QNetworkReply *reply = m_network->get(request);
+    Launcher *l = launcher();
+    connect(reply, &QNetworkReply::finished, this, [this, reply, url, l] {
+        reply->deleteLater();
+        const QString answer = QString::fromUtf8(reply->readAll()).trimmed();
+        if (reply->error() != QNetworkReply::NoError || !answer.startsWith(QLatin1String("https://"))) {
+            l->notify(answer.startsWith(QLatin1String("Error")) ? answer : tr("Could not shorten that address"));
+            return;
+        }
+        m_short.insert(url, answer);
+        l->copyText(answer);
+        publish();
+    });
+}
+
 // ---------------------------------------------------------- speed test
 
 void NetworkSource::runSpeedTest()
@@ -319,6 +341,23 @@ void NetworkSource::publish()
             pub.subtitle = tr("Asking ipinfo.io");
         }
         items << pub;
+    }
+
+    // Shortening: "shorten https://…" or "shorten" for the copied address.
+    static const QRegularExpression shortenWords(QStringLiteral(R"(^(?:shorten|short(?:en)?\s+(?:url|link)|shorten\s+(?:url|link))(?:\s+(\S+))?$)"));
+    if (const auto sm = shortenWords.match(q); sm.hasMatch()) {
+        QString url = sm.captured(1).isEmpty() ? l->recentClipboardText(0).trimmed() : m_query.section(u' ', -1);
+        if (!url.contains(QLatin1String("://")) && url.contains(u'.') && !url.contains(u' '))
+            url.prepend(QStringLiteral("https://"));
+        const bool web = url.startsWith(QLatin1String("http://")) || url.startsWith(QLatin1String("https://"));
+        const QString shortUrl = m_short.value(url);
+        Item item = card(QStringLiteral("shorten"), !shortUrl.isEmpty() ? shortUrl : web ? tr("Shorten Link") : tr("Copy a link first"),
+                         web ? url : tr("Or type it: shorten example.com/a/long/page"), QStringLiteral("insert-link"), 114);
+        if (web && shortUrl.isEmpty())
+            item.actions << Action{tr("Shorten and Copy"), {}, {}, [self, url] { self->shorten(url); }, true};
+        else if (!shortUrl.isEmpty())
+            item.actions << Action{tr("Copy Short Link"), {}, {}, [l, shortUrl] { l->copyText(shortUrl); }};
+        items << item;
     }
 
     // Speed test.

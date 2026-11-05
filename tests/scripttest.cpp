@@ -6,6 +6,7 @@
 #include "outputview.h"
 #include "browserhistory.h"
 #include "focusmode.h"
+#include "aichat.h"
 #include "appquit.h"
 #include "devices.h"
 #include "language.h"
@@ -364,6 +365,29 @@ Best, me 👋)"), {{QStringLiteral("who"), QStringLiteral("Ann")}});
                  (QStringList{QStringLiteral("output.DP-1.enable"), QStringLiteral("output.DP-1.mode.2560x1440@165"), QStringLiteral("output.DP-1.position.0,0"),
                               QStringLiteral("output.DP-1.scale.1.25"), QStringLiteral("output.DP-1.rotation.none"), QStringLiteral("output.DP-1.priority.1"),
                               QStringLiteral("output.HDMI-A-1.disable")}));
+    }
+
+    void aiText()
+    {
+        QCOMPARE(AiChat::visible(QStringLiteral("<think>hmm, let me see</think>\n\nThe answer.")), QStringLiteral("The answer."));
+        QCOMPARE(AiChat::visible(QStringLiteral("<think>still thinking")), QString()); // nothing to show yet
+        QCOMPARE(AiChat::firstCode(QStringLiteral("Run:\n\n```bash\nls -lhS\n```\n\nand then ```x``` too")), QStringLiteral("ls -lhS"));
+        QVERIFY(AiChat::firstCode(QStringLiteral("no code here")).isEmpty());
+        QCOMPARE(AiChat::plainLine(QStringLiteral("Use `lsof`.\n**Quick:**\n```bash\nsudo lsof -i :80\n```")), QStringLiteral("Use lsof. Quick: sudo lsof -i :80"));
+    }
+
+    void readyMadeLinks()
+    {
+        QTemporaryDir dir;
+        qputenv("XDG_CONFIG_HOME", dir.path().toUtf8());
+        Library library;
+        library.setQuickLinks({{QStringLiteral("My Tube"), QStringLiteral("yt"), QStringLiteral("https://example.com/{query}"), QStringLiteral("firefox.desktop")}});
+        const int added = library.addReadyMadeLinks();
+        // Every ready-made link but YouTube, whose keyword is taken.
+        QCOMPARE(added, int(Library::readyMadeLinks().size()) - 1);
+        QCOMPARE(library.addReadyMadeLinks(), 0);
+        Library again; // the app a link opens with is kept
+        QCOMPARE(again.quickLinks().first().app, QStringLiteral("firefox.desktop"));
     }
 
     void plainOutput()
