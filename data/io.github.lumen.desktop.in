@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Name=Lumen
+GenericName=Launcher
+Comment=Search apps, files, clipboard history and commands
+Exec=@LUMEN_BINARY@ --toggle
+Icon=search
+Categories=Utility;
+Keywords=launcher;search;clipboard;snippets;
+X-KDE-StartupNotify=false
+# KWin grants the fake-input protocol (used to paste into the focused app)
+# only to programs whose desktop entry asks for it with their full path.
+# Plasma's window management tells Lumen which window is in front and
+# where its menu is (Search Menu Items).
+X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input,org_kde_plasma_window_management
+# KWin's colour picker (Pick Colour) and window screenshots (window switcher
+# thumbnails) are likewise limited to programs that ask.
+X-KDE-DBUS-Restricted-Interfaces=org.kde.kwin.ColorPicker,org.kde.KWin.ScreenShot2

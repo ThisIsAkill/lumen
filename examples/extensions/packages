@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Lumen extension: search installed packages (Arch: pacman). Keyword: pkg
+
+Copy into ~/.config/lumen/extensions/ and make it executable. Lumen runs
+`packages info` once and `packages search TEXT` while you type "pkg TEXT".
+"""
+import json
+import subprocess
+import sys
+
+if len(sys.argv) < 2:
+    sys.exit(1)
+
+if sys.argv[1] == "info":
+    print(json.dumps({"name": "Installed Packages", "keyword": "pkg",
+                      "description": "Search the packages installed on this system",
+                      "icon": "package-x-generic"}))
+elif sys.argv[1] == "search":
+    terms = sys.argv[2].split() if len(sys.argv) > 2 else []
+    out = subprocess.run(["pacman", "-Qs", *terms], capture_output=True, text=True).stdout.splitlines()
+    results = []
+    # pacman prints "local/name version" followed by an indented description.
+    for header, description in zip(out[0::2], out[1::2]):
+        name, version = header.split("/", 1)[1].split(" ", 1)[0], header.split(" ")[1]
+        results.append({"title": name, "subtitle": f"{version} · {description.strip()}",
+                        "icon": "package-x-generic", "copy": name})
+    print(json.dumps(results[:50]))

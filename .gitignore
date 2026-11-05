@@ -1,0 +1,6 @@
+build/
+compile_commands.json
+.cache/
+# Review screenshots stay local; only the one the README shows is kept.
+docs/*.png
+!docs/lumen-dark.png
