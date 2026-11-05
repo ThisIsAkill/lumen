@@ -6,6 +6,8 @@
 
 #include <KService>
 
+#include <motion.h>
+
 #include <QHash>
 #include <QDateTime>
 #include <QPointer>
@@ -35,11 +37,12 @@ class QAction;
 class QTimer;
 class QLabel;
 class QLineEdit;
-class QListView;
+class ResultList;
 class ResultModel;
 class SearchGlyph;
 class SettingsDialog;
 class Source;
+class StatusLine;
 class ViewChip;
 
 // The launcher window: a search field over a result list, shown and hidden
@@ -49,13 +52,16 @@ class ViewChip;
 // Commands can open a view (clipboard history, files, snippets) that takes
 // over the list until Esc or Backspace in an empty field. Ctrl+K lists the
 // selected result's actions.
+//
+// The card springs open and its picture shrinks away when it closes; views
+// slide in and out, the selection glides, new results settle in (see
+// motion.h and ResultList). The state changes at once in every case: only
+// the picture takes its time.
 class Launcher : public QWidget
 {
     Q_OBJECT
-    // 0 → 1 while the card appears (see animateIn()).
-    Q_PROPERTY(qreal appear READ appear WRITE setAppear)
 public:
-    enum View { RootView, ClipboardView, FilesView, SnippetsView, EmojiView, WindowsView, TransformView, ProcessesView, DownloadsView, PasteStackView, MenusView, TabsView, HistoryView, CalculationsView, ThemeView };
+    enum View { RootView, ClipboardView, FilesView, SnippetsView, EmojiView, WindowsView, TransformView, ProcessesView, DownloadsView, PasteStackView, MenusView, TabsView, HistoryView, CalculationsView, ThemeView, PackagesView, AppsView };
     enum SettingsTab { GeneralTab, SnippetsTab, QuickLinksTab, CommandsTab, CalendarTab, FocusTab };
 
     Launcher();
@@ -108,6 +114,7 @@ public:
     Expansion *expansion() const { return m_expansion; }
     AppHotkeys *appHotkeys() const { return m_hotkeys; }
     void launchApp(const QString &storageId);
+    void openUrl(const QUrl &url); // in the default browser or app
 
     // Uses the search field to ask for text (secret: hidden as typed, for
     // passwords), showing `shown` as what it is about; Enter answers, Esc
@@ -149,8 +156,8 @@ private:
     void setupWindow();
     void layoutCard();
     void animateIn();
-    qreal appear() const { return m_appear; }
-    void setAppear(qreal appear);
+    void revealList(int how); // the next results slide in (a ResultList::Reveal)
+    void pressHint(const QString &keys); // the footer's key cap for a pressed shortcut
     void updatePane(); // shows the side preview in views that have one
     void restyle(); // palette-dependent style sheets (scrollbar, labels)
     void setupShortcut();
@@ -230,9 +237,9 @@ private:
     ViewChip *m_chip;
     ArgumentBar *m_args;
     QLineEdit *m_search;
-    QListView *m_list;
+    ResultList *m_list;
     ResultModel *m_model;
-    QLabel *m_status;
+    StatusLine *m_status;
     KeyHints *m_hints;
     QAction *m_toggleAction;
     Hud *m_hud;
@@ -240,11 +247,16 @@ private:
     Paster *m_paster;
     class PasteStack *m_pasteStack;
     class FocusMode *m_focus;
+    class KeepAwake *m_awake;
     Expansion *m_expansion;
     AppHotkeys *m_hotkeys;
     PreviewPane *m_pane;
     QPointer<SettingsDialog> m_settings;
     NotesWindow *m_notes = nullptr;
-    bool m_overlay = false;
-    qreal m_appear = 1; // full-screen transparent layer surface (Wayland)
+    bool m_overlay = false; // full-screen transparent layer surface (Wayland)
+
+    Tween m_opening;     // 0 → 1 while the card springs open
+    Motion::Pose m_pose; // how the card is drawn meanwhile
+    Tween m_cardWidth;   // the card's width, eased when the preview pane comes and goes
+    Tween m_glow;        // the outline around the field while it asks something
 };

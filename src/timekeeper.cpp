@@ -2,6 +2,7 @@
 #include "timeparse.h"
 
 #include <chrome.h>
+#include <motion.h>
 
 #include <LayerShellQt/Window>
 
@@ -41,6 +42,12 @@ bool onWayland()
 // the family of the launcher's messages, with a ring that empties as the
 // timer runs, the timer's label and the time left in equal-width digits.
 // It never takes focus: the user is working in some other window.
+//
+// It drops in from the screen edge and its picture shrinks away when the
+// last timer ends (dismiss()). The ring moves smoothly when the time left
+// jumps (time added, another timer taking over); the second-by-second
+// steps are too small to see and are not animated, so a running timer
+// repaints once a second and no more.
 class TimerBadge : public QWidget
 {
 public:
@@ -54,7 +61,11 @@ public:
     };
 
     TimerBadge()
+        : m_reveal(this)
+        , m_ring(this)
     {
+        m_reveal.onStep = [this](qreal) { update(); };
+        m_ring.onStep = [this](qreal) { update(); };
         setAttribute(Qt::WA_TranslucentBackground);
         setWindowFlags(Qt::FramelessWindowHint | Qt::Tool | Qt::WindowStaysOnTopHint | Qt::WindowDoesNotAcceptFocus);
         setAttribute(Qt::WA_ShowWithoutActivating);
@@ -76,6 +87,10 @@ public:
         // The width only follows the parts that change rarely (label, count),
         // so the pill does not jitter as the digits count down.
         const bool relayout = state.label != m_state.label || state.more != m_state.more || state.paused != m_state.paused;
+        if (!isVisible() || qAbs(state.progress - m_ring.value()) < 0.02)
+            m_ring.jump(state.progress); // a tick of the clock
+        else
+            m_ring.to(state.progress, Motion::Pulse, Motion::entrance()); // a jump worth seeing
         m_state = state;
         const QFontMetrics fm(font());
         const QFontMetrics timeFm(timeFont());
@@ -94,11 +109,29 @@ public:
         update();
     }
 
+    // Hides the badge, leaving its picture to shrink away.
+    void dismiss()
+    {
+        if (!isVisible())
+            return;
+        Ghost::dismiss(this, rect());
+        hide();
+    }
+
 protected:
+    void showEvent(QShowEvent *event) override
+    {
+        QWidget::showEvent(event);
+        m_reveal.start(0, 1, Motion::Toast, Motion::spring()); // drops in from the top edge
+    }
+
     void paintEvent(QPaintEvent *) override
     {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
+        const qreal reveal = m_reveal.value();
+        p.setOpacity(reveal);
+        p.translate(0, -(1 - reveal) * Drop);
         const QPalette pal = palette();
         const bool dark = Chrome::isDark(pal);
         // The badge is never the active window, and Breeze fades the
@@ -131,7 +164,7 @@ protected:
         p.setBrush(Qt::NoBrush);
         p.setPen(QPen(Chrome::withAlpha(pal.color(QPalette::WindowText), dark ? 50 : 36), 2.2));
         p.drawEllipse(ring);
-        const qreal left = std::clamp(1.0 - m_state.progress, 0.0, 1.0);
+        const qreal left = std::clamp(1.0 - m_ring.value(), 0.0, 1.0);
         p.setPen(QPen(m_state.paused ? Chrome::withAlpha(accent, 120) : accent, 2.2, Qt::SolidLine, Qt::FlatCap));
         p.drawArc(ring, 90 * 16, -int(left * 360 * 16));
         p.setPen(Qt::NoPen);
@@ -171,6 +204,7 @@ private:
     static constexpr int PadRight = 14;
     static constexpr int Gap = 7;
     static constexpr int RingRadius = 9;
+    static constexpr int Drop = 8; // how far above its place the pill starts
 
     QFont timeFont() const
     {
@@ -182,6 +216,8 @@ private:
     QString moreText() const { return QStringLiteral("+%1").arg(m_state.more); }
 
     State m_state;
+    Tween m_reveal; // 0 hidden → 1 in place
+    Tween m_ring;   // the progress the ring shows
 };
 
 int Timekeeper::Timer::secondsLeft() const
@@ -345,7 +381,7 @@ void Timekeeper::update()
 {
     if (m_timers.isEmpty()) {
         m_tick.stop();
-        m_badge->hide();
+        m_badge->dismiss();
     } else {
         tick();
         m_badge->show();

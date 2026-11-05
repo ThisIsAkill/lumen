@@ -99,6 +99,44 @@ press **Enter**.
   apps and sites (Settings → Focus) are minimized whenever they come up,
   notifications wait (Do Not Disturb), and the countdown shows in the corner.
 
+**Words**
+- **Translate**: `translate bonjour`, `tr guten morgen`, `good night in
+  japanese`, `translate thank you to korean` (Google Translate's free web
+  service). The target is your system language, or lumenrc `[Translate]
+  Target=de`; text already in it goes to English.
+- **Dictionary**: `define serendipity` (Enter shows the whole entry),
+  `synonyms for happy`, `rhymes with orange` (dictionaryapi.dev, Datamuse).
+
+**Network**
+- `my ip`: local and public addresses, with place and provider.
+- `speed test`: latency, download and upload against Cloudflare's servers.
+- `dns example.com`, `whois example.com`, `ping example.com`, `flush dns`.
+- `vpn`: NetworkManager VPN and WireGuard connections on and off.
+- `tailscale` (or a device's name): the tailnet's devices; copy an address,
+  SSH in, pick an exit node; connect and disconnect.
+
+**Screens, phone, power**
+- `brightness`, `brightness 40`, `brightness up`: every screen Plasma can dim.
+- `resolution` / `refresh rate`: each screen's modes; a new one goes back
+  after 15 seconds unless you keep it.
+- **Save Display Layout**: the screens' modes, places, scale and rotation by
+  name, restored by typing it; `night light` pauses or resumes Night Light.
+- **KDE Connect**: `phone`, `ring my phone` or a device's name: battery, ring,
+  send the clipboard, ping, send a text message.
+- **Keep Awake**: `keep awake` (or `caffeinate`) for 30 minutes, 1 or 2 hours
+  or until stopped: no sleep and no screen lock meanwhile.
+
+**Software**
+- **Packages**: `install obs` (or **Install Packages**) searches the Arch
+  repositories, the AUR and Flathub together; Enter installs, Ctrl+Backspace
+  removes, and the work runs in the background with its output streaming into
+  the pane beside the list and a notification when it is done (pacman asks
+  for your password through Plasma's dialog; AUR packages are built with yay
+  or paru). **Update Packages** lists what can be updated, with Upgrade All.
+- **Force Quit Applications**: running apps by name; Enter quits one
+  (its windows close as with their close button), Ctrl+Delete forces it.
+  `quit kate`, `force quit steam` and **Quit All Apps** work from the search.
+
 **Browser**
 - **Browser history**: pages you visited in Firefox (and LibreWolf, Zen,
   Floorp, Waterfox) and Chrome, Chromium, Brave, Vivaldi, Edge and Opera appear
@@ -168,6 +206,10 @@ press **Enter**.
   Ctrl+K → Use as Fallback adds one.
 - **Themes**: System, Light, Dark, Midnight, Paper, Mocha or Forest, with any
   accent colour (Settings → General, or **Lumen Theme**).
+- **Motion**: the card springs open and shrinks away, the selection glides,
+  views slide in and out, new results settle in. It follows Plasma's
+  animation speed (System Settings → Workspace Behavior → General Behavior);
+  "instant" turns it all off.
 - **Favourites** (Ctrl+D on a result) appear on the start screen; **aliases**
   (Ctrl+Shift+A) bring up a result with a word of your choice (`ff` →
   Firefox).
@@ -212,7 +254,7 @@ lumen --toggle            show or hide
 lumen --show TEXT         show with TEXT typed
 lumen --view NAME [TEXT]  open a view: clipboard, files, snippets, emoji, windows, notes,
                           transform, processes, downloads, paste-stack, menu, tabs,
-                          history, calculations, theme
+                          history, calculations, theme, packages, apps
 lumen --settings          settings window
 lumen --tile left-half    move the active window (every command id: lumen --help;
                           "restore" undoes the last one)

@@ -6,6 +6,11 @@
 #include "outputview.h"
 #include "browserhistory.h"
 #include "focusmode.h"
+#include "appquit.h"
+#include "devices.h"
+#include "language.h"
+#include "network.h"
+#include "packages.h"
 #include "theme.h"
 #include "scriptcommands.h"
 #include "windowlayouts.h"
@@ -230,6 +235,135 @@ Best, me 👋)"), {{QStringLiteral("who"), QStringLiteral("Ann")}});
         QCOMPARE(yellow.color(QPalette::Window), QColor(0xf3, 0xee, 0xe4));
         QCOMPARE(yellow.color(QPalette::Highlight), QColor(0xe8, 0xb5, 0x00));
         QCOMPARE(Theme::palette(QStringLiteral("dark"), QStringLiteral("blue"), system).color(QPalette::HighlightedText), QColor(Qt::white));
+    }
+
+    void packageOutput()
+    {
+        const auto repo = PackageManager::parsePacmanSearch(QStringLiteral(
+            "extra/firefox 157.0-1 [installed: 156.0-1]\n    Fast, Private & Safe Web Browser\n"
+            "cachyos-v3/firefox-pure 157.0-1 (browsers)\n    Another one\n"
+            "core/firefox 150.0-1\n    The same name further down: hidden\n"));
+        QCOMPARE(repo.size(), 2);
+        QCOMPARE(repo.at(0).repo, QStringLiteral("extra"));
+        QCOMPARE(repo.at(0).name, QStringLiteral("firefox"));
+        QCOMPARE(repo.at(0).version, QStringLiteral("157.0-1"));
+        QCOMPARE(repo.at(1).description, QStringLiteral("Another one"));
+
+        const auto aur = PackageManager::parseAurSearch(QByteArrayLiteral(
+            R"({"results": [{"Name": "a-tool", "Version": "1-1", "Description": "few", "NumVotes": 3},
+                            {"Name": "b-tool", "Version": "2-1", "Description": "many", "NumVotes": 900}]})"));
+        QCOMPARE(aur.size(), 2);
+        QCOMPARE(aur.first().name, QStringLiteral("b-tool")); // most voted first
+        QCOMPARE(aur.first().votes, 900);
+
+        const auto flat = PackageManager::parseFlatpakSearch(
+            QStringLiteral("Firefox\torg.mozilla.firefox\t156.0.1\tflathub\tFast, Private & Safe Web Browser\nNo matches found\n"));
+        QCOMPARE(flat.size(), 1);
+        QCOMPARE(flat.first().title, QStringLiteral("Firefox"));
+        QCOMPARE(flat.first().name, QStringLiteral("org.mozilla.firefox"));
+        QCOMPARE(flat.first().repo, QStringLiteral("flathub"));
+    }
+
+    void packageCommands()
+    {
+        using PM = PackageManager;
+        PM::Package repo;
+        repo.name = QStringLiteral("firefox");
+        QCOMPARE(PM::commandFor(PM::Task::Install, repo, {}).join(u' '), QStringLiteral("pkexec pacman -S --noconfirm --needed firefox"));
+        QCOMPARE(PM::commandFor(PM::Task::Remove, repo, {}).join(u' '), QStringLiteral("pkexec pacman -Rns --noconfirm firefox"));
+        PM::Package aur;
+        aur.origin = PM::Aur;
+        aur.name = QStringLiteral("b-tool");
+        QCOMPARE(PM::commandFor(PM::Task::Install, aur, QStringLiteral("yay")).join(u' '),
+                 QStringLiteral("yay -S --noconfirm --needed --sudo pkexec --answerdiff None --answerclean None --removemake b-tool"));
+        QVERIFY(PM::commandFor(PM::Task::Install, aur, QStringLiteral("paru")).contains(QStringLiteral("--skipreview")));
+        PM::Package flat;
+        flat.origin = PM::Flatpak;
+        flat.name = QStringLiteral("org.mozilla.firefox");
+        flat.repo = QStringLiteral("flathub");
+        QCOMPARE(PM::commandFor(PM::Task::Install, flat, {}).join(u' '), QStringLiteral("flatpak install -y --noninteractive flathub org.mozilla.firefox"));
+        QCOMPARE(PM::commandFor(PM::Task::Update, flat, {}).join(u' '), QStringLiteral("flatpak update -y --noninteractive org.mozilla.firefox"));
+        // Upgrading everything starts with a full system upgrade.
+        QVERIFY(PM::commandFor(PM::Task::UpgradeAll, {}, QStringLiteral("yay")).last().startsWith(QStringLiteral("pkexec pacman -Syu --noconfirm && yay -Sua")));
+    }
+
+    void runningApps()
+    {
+        const auto apps = AppQuitSource::appsFrom(QStringLiteral(R"([
+            {"app": "org.kde.kate", "cls": "kate", "caption": "a.cpp", "pid": 10},
+            {"app": "org.kde.kate", "cls": "kate", "caption": "b.cpp", "pid": 10},
+            {"app": "", "cls": "steam", "caption": "Steam", "pid": 20},
+            {"app": "org.kde.plasmashell", "cls": "plasmashell", "caption": "Desktop", "pid": 30},
+            {"app": "", "cls": "lumen", "caption": "Copied", "pid": 40}])"));
+        QCOMPARE(apps.size(), 2); // grouped by app; never the desktop or Lumen
+        const auto kate = std::find_if(apps.cbegin(), apps.cend(), [](const AppQuitSource::App &a) { return a.id == QLatin1String("org.kde.kate"); });
+        QVERIFY(kate != apps.cend());
+        QCOMPARE(kate->pids, QList<qint64>{10});
+        QCOMPARE(kate->captions.size(), 2);
+        const auto steam = std::find_if(apps.cbegin(), apps.cend(), [](const AppQuitSource::App &a) { return a.id == QLatin1String("steam"); });
+        QCOMPARE(steam->name, QStringLiteral("Steam")); // no desktop entry: the window class, capitalised
+    }
+
+    void languageRequests()
+    {
+        using R = LanguageSource::Request;
+        auto parse = [](const char *q) { return LanguageSource::parse(QString::fromUtf8(q)); };
+        auto t = parse("translate bonjour le monde");
+        QVERIFY(t && t->kind == R::Translate && t->explicitly);
+        QCOMPARE(t->text, QStringLiteral("bonjour le monde"));
+        QVERIFY(t->target.isEmpty());
+        t = parse("tr good night to Japanese");
+        QCOMPARE(t->text, QStringLiteral("good night"));
+        QCOMPARE(t->target, QStringLiteral("ja"));
+        t = parse("translate I want to go to school"); // "school" is no language: all of it is the text
+        QCOMPARE(t->text, QStringLiteral("I want to go to school"));
+        t = parse("good morning in spanish");
+        QVERIFY(t && !t->explicitly);
+        QCOMPARE(t->target, QStringLiteral("es"));
+        QVERIFY(!parse("5 km in miles"));    // a conversion
+        QVERIFY(!parse("time in tokyo"));    // a place
+        QVERIFY(!parse("notes in kate"));
+        QCOMPARE(parse("define serendipity")->kind, R::Define);
+        QCOMPARE(parse("what does ephemeral mean")->text, QStringLiteral("ephemeral"));
+        QCOMPARE(parse("synonyms for happy")->kind, R::Synonyms);
+        QCOMPARE(parse("rhymes with orange")->text, QStringLiteral("orange"));
+        QCOMPARE(LanguageSource::languageCode(QStringLiteral("Deutsch")), QStringLiteral("de"));
+        QCOMPARE(LanguageSource::languageCode(QStringLiteral("chinese")), QStringLiteral("zh-CN"));
+        QVERIFY(LanguageSource::languageCode(QStringLiteral("in")).isEmpty());
+        const auto [text, source] = LanguageSource::parseTranslation(
+            QByteArrayLiteral(R"([[["Hallo ","Hello ",null,null,10],["Welt","world",null,null,10]],null,"en"])"));
+        QCOMPARE(text, QStringLiteral("Hallo Welt"));
+        QCOMPARE(source, QStringLiteral("en"));
+    }
+
+    void networkBits()
+    {
+        QCOMPARE(NetworkSource::speedText(412.4e6), QStringLiteral("412 Mbps"));
+        QCOMPARE(NetworkSource::speedText(12.34e6), QStringLiteral("12.3 Mbps"));
+        QCOMPARE(NetworkSource::speedText(1.5e9), QStringLiteral("1.50 Gbps"));
+        const QJsonObject status = QJsonDocument::fromJson(R"({"Peer": {
+            "a": {"HostName": "laptop", "DNSName": "laptop.tail1.ts.net.", "TailscaleIPs": ["100.1.1.1"], "OS": "linux", "Online": false},
+            "b": {"HostName": "phone", "DNSName": "phone.tail1.ts.net.", "TailscaleIPs": ["100.1.1.2"], "OS": "android", "Online": true,
+                  "ExitNodeOption": true}}})").object();
+        const auto peers = NetworkSource::parseTailscale(status);
+        QCOMPARE(peers.size(), 2);
+        QCOMPARE(peers.first().name, QStringLiteral("phone")); // online first
+        QCOMPARE(peers.first().dnsName, QStringLiteral("phone.tail1.ts.net"));
+        QVERIFY(peers.first().exitNodeOption);
+    }
+
+    void displayProfiles()
+    {
+        const QJsonArray outputs = QJsonDocument::fromJson(R"([
+            {"name": "DP-1", "connected": true, "enabled": true, "currentModeId": "2",
+             "modes": [{"id": "1", "name": "1920x1080@60"}, {"id": "2", "name": "2560x1440@165"}],
+             "pos": {"x": 0, "y": 0}, "scale": 1.25, "rotation": 1, "priority": 1},
+            {"name": "HDMI-A-1", "connected": true, "enabled": false},
+            {"name": "DP-2", "connected": false, "enabled": false}])").array();
+        QCOMPARE(DisplaySource::profileArguments(outputs),
+                 (QStringList{QStringLiteral("output.DP-1.enable"), QStringLiteral("output.DP-1.mode.2560x1440@165"), QStringLiteral("output.DP-1.position.0,0"),
+                              QStringLiteral("output.DP-1.scale.1.25"), QStringLiteral("output.DP-1.rotation.none"), QStringLiteral("output.DP-1.priority.1"),
+                              QStringLiteral("output.HDMI-A-1.disable")}));
     }
 
     void plainOutput()

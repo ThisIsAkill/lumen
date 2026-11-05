@@ -2,7 +2,14 @@
 
 #include "item.h"
 
+#include <motion.h>
+
 #include <QAbstractListModel>
+#include <QElapsedTimer>
+#include <QHash>
+#include <QListView>
+#include <QPixmap>
+#include <QSet>
 #include <QStyledItemDelegate>
 
 // The rows currently shown: results, or the actions of one result.
@@ -65,10 +72,80 @@ private:
     QString m_searchText;
 };
 
+// The list of results. The selection highlight belongs to the list rather
+// than to the rows: it glides from row to row (and follows a result that
+// moves as the results refine) instead of jumping, and flashes to confirm
+// an action (pulse()). Rows new to the list settle in with a short rise and
+// fade, one shortly after the other, while rows that stay put do not move,
+// so typing never flickers. When a view opens or closes, the whole content
+// slides in from the side the navigation went (revealNext()).
+//
+// All of this follows KDE's animation speed (see motion.h): at "instant"
+// the list behaves like a plain QListView.
+class ResultList : public QListView
+{
+    Q_OBJECT
+public:
+    enum Reveal {
+        FromRight, // a view opened: deeper into the launcher
+        FromLeft,  // a view left: back towards the main search
+        FromBelow, // a list that pops up over the results (actions)
+        FadeIn,    // back from one of those
+    };
+
+    explicit ResultList(QWidget *parent = nullptr);
+
+    void setModel(QAbstractItemModel *model) override;
+    // The content of the next results slides in from that side.
+    void revealNext(Reveal how);
+    // Flashes the highlight: something was done to the selected result.
+    void pulse();
+
+    // For the delegate: how far a row has settled in, 0 (just arrived) to 1.
+    qreal settled(const QModelIndex &index) const;
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+    void currentChanged(const QModelIndex &current, const QModelIndex &previous) override;
+    void scrollContentsBy(int dx, int dy) override;
+    void hideEvent(QHideEvent *event) override;
+
+private:
+    void aboutToReset();
+    void wasReset();
+    void scheduleCapture(); // a fresh picture of the content for the slide, once this event is done
+    void captureSlide();
+    void paintHighlight(QPainter &p, const QRectF &r) const;
+    QRectF highlightRect(const QModelIndex &index) const;
+    QRectF currentHighlight() const; // where it belongs right now, mid-glide included
+
+    // The highlight's glide: from where it was drawn to the current row.
+    Tween m_glide;
+    QRectF m_glideFrom;
+    QRectF m_drawn;                // where it was painted last
+    bool m_highlightShown = false; // painted last time: a glide has somewhere to start from
+    Tween m_pulse;
+
+    // Rows settling in, by result id, with the moment each one started.
+    QElapsedTimer m_clock;
+    QHash<QString, qint64> m_settleStart;
+    QSet<QString> m_idsBefore; // the ids before the current reset
+    Tween m_settleTicker;      // repaints while rows settle
+
+    // The content sliding in: drawn from a picture taken outside the paint
+    // event (a widget cannot render itself while it is being painted).
+    Reveal m_reveal = FadeIn;
+    qint64 m_revealAsked = -1; // when revealNext() was called, or -1
+    Tween m_slide;
+    QPixmap m_slidePicture;
+    bool m_capturing = false;       // painting into the picture
+    bool m_captureQueued = false;
+};
+
 // Draws a row: the icon on a faint tile, title, a dimmer subtitle after it,
 // and the kind on the right as a chip (or key caps for an action's
-// shortcut). The selected row gets an accent-tinted highlight with a short
-// accent bar on its left edge.
+// shortcut). The list paints the highlight of the selected row (see
+// ResultList) under the row's content.
 //
 // Answers, running timers, the next event and the now-playing row sit on
 // an accent-tinted tile; the first three also set their title large over
@@ -115,7 +192,8 @@ namespace KeyCaps
 int height(const QFont &base);
 int width(const QFont &base, const QString &keys);
 // Draws the caps for `keys` inside rect, left- or right-aligned, vertically
-// centred. Returns the width used.
+// centred. `pressed` (0–1) sinks the caps into the surface, as a key being
+// held. Returns the width used.
 int draw(QPainter &p, const QRect &rect, const QString &keys, const QPalette &palette,
-         Qt::Alignment align = Qt::AlignLeft);
+         Qt::Alignment align = Qt::AlignLeft, qreal pressed = 0);
 } // namespace KeyCaps

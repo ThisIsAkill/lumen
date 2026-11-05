@@ -3,6 +3,7 @@
 #include "style.h"
 
 #include <chrome.h>
+#include <motion.h>
 
 #include <QFileInfo>
 #include <QFontDatabase>
@@ -208,6 +209,8 @@ void PreviewPane::rebuild()
     if (key == m_shownKey && m_content)
         return;
     m_shownKey = key;
+    // What is shown now fades out over what comes next.
+    FadeOut::begin(this, rect());
     delete m_content; // the layout drops its slot by itself
     if (m_spacer) {
         m_layout->removeItem(m_spacer);

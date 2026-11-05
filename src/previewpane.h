@@ -15,7 +15,7 @@ struct Item;
 // views: the selected file through Quick Look's viewers (videos paused on
 // their first frame), a clipboard text in full, or a window's thumbnail.
 // Rebuilt shortly after the selection settles, so arrowing quickly through
-// a list stays smooth.
+// a list stays smooth, and cross-faded from what it showed before.
 //
 // The pane shares the launcher's result well. Content that is not paper
 // (images, thumbnails, info cards) sits on a toned stage with rounded

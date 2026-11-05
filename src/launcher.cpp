@@ -1,6 +1,7 @@
 #include "launcher.h"
 #include "answersource.h"
 #include "apphotkeys.h"
+#include "appquit.h"
 #include "appsource.h"
 #include "browserhistory.h"
 #include "builtinsource.h"
@@ -21,6 +22,10 @@
 #include "windowsource.h"
 #include "clipboardhistory.h"
 #include "desktopsource.h"
+#include "devices.h"
+#include "keepawake.h"
+#include "language.h"
+#include "network.h"
 #include "filesource.h"
 #include "focusmode.h"
 #include "krunnersource.h"
@@ -31,6 +36,7 @@
 #include "screentools.h"
 #include "noteswindow.h"
 #include "paster.h"
+#include "packages.h"
 #include "pastestack.h"
 #include "projectsource.h"
 #include "previewpane.h"
@@ -54,8 +60,6 @@
 #include <QComboBox>
 #include <QApplication>
 #include <QSet>
-#include <QGraphicsOpacityEffect>
-#include <QPropertyAnimation>
 #include <QDir>
 #include <QCryptographicHash>
 #include <QClipboard>
@@ -94,6 +98,7 @@ constexpr int TokenRadius = 9;
 constexpr int TokenPad = 10;    // text inset in a token
 const QSize CardSize(760, 500);
 constexpr int PaneCardWidth = 1080; // the card with the preview pane beside the list
+constexpr int CardDrop = 12;        // how far above its place the card starts when it opens
 
 // The hairline of light along the card's top edge: Lumen's mark.
 void drawBeam(QPainter &p, const QRectF &body, qreal radius, const QColor &accent, int alpha)
@@ -166,12 +171,13 @@ QString keyText(const QKeySequence &key)
 } // namespace
 
 // A small glass pill near the bottom of the screen ("Copied"), used when
-// the launcher itself has already closed. Its margins leave room for the
-// shadow.
+// the launcher itself has already closed. It rises into place and sinks
+// away again; its margins leave room for the shadow and that movement.
 class Hud : public QLabel
 {
 public:
     Hud()
+        : m_reveal(this)
     {
         setAttribute(Qt::WA_TranslucentBackground);
         setWindowFlags(Qt::FramelessWindowHint | Qt::Tool | Qt::WindowStaysOnTopHint | Qt::WindowDoesNotAcceptFocus);
@@ -191,7 +197,12 @@ public:
         }
         m_timer.setSingleShot(true);
         m_timer.setInterval(1400);
-        QObject::connect(&m_timer, &QTimer::timeout, this, &QWidget::hide);
+        QObject::connect(&m_timer, &QTimer::timeout, this, [this] { m_reveal.to(0, Motion::Toast, Motion::exit()); });
+        m_reveal.onStep = [this](qreal) { update(); };
+        m_reveal.onDone = [this] {
+            if (m_reveal.value() <= 0)
+                hide();
+        };
     }
 
     void flash(const QString &message)
@@ -202,7 +213,12 @@ public:
             const QRect screen = QGuiApplication::primaryScreen()->availableGeometry();
             move(screen.center().x() - width() / 2, screen.bottom() - 90 + HudShadow - height());
         }
-        show();
+        if (!isVisible()) {
+            show();
+            m_reveal.start(0, 1, Motion::Toast, Motion::spring());
+        } else if (m_reveal.value() < 1) {
+            m_reveal.to(1, Motion::Toast, Motion::spring()); // caught while sinking away
+        }
         m_timer.start();
     }
 
@@ -211,6 +227,10 @@ protected:
     {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
+        // Rising from a little below while it fades in; the reverse going.
+        const qreal reveal = m_reveal.value();
+        p.setOpacity(reveal);
+        p.translate(0, (1 - reveal) * Rise);
         const QPalette pal = palette();
         const bool dark = Chrome::isDark(pal);
         const QRectF body = QRectF(rect()).adjusted(HudShadow + 0.5, HudShadow + 0.5, -HudShadow - 0.5, -HudShadow - 0.5);
@@ -229,27 +249,41 @@ protected:
 
 private:
     static constexpr int HudShadow = 16;
+    static constexpr int Rise = 8; // how far below its place the pill starts
     QTimer m_timer;
+    Tween m_reveal; // 0 hidden → 1 in place
 };
 
 // The pill in the search row naming the open view ("Files", "Actions"):
 // filled with the accent colour, like Quick Look's main button. While the
 // field asks a question ("Alias", "Password") it is outlined instead, so
 // the prompt reads as a different state from a view.
+//
+// It pops in whenever it appears or says something new, so the eye is drawn
+// to the row's change of state.
 class ViewChip : public QLabel
 {
 public:
     explicit ViewChip(QWidget *parent)
         : QLabel(parent)
+        , m_pop(this)
     {
         setFont(Chrome::scaledFont(font(), 0.92, QFont::DemiBold));
         setContentsMargins(11, 4, 11, 4);
         setAlignment(Qt::AlignCenter);
+        m_pop.jump(1);
+        m_pop.onStep = [this](qreal) { update(); };
     }
 
-    void setOutlined(bool outlined)
+    // Shows the chip with `text`, popping in when that is a change.
+    void present(const QString &text, bool outlined)
     {
+        const bool changed = !isVisibleTo(parentWidget()) || text != this->text() || outlined != m_outlined;
+        setText(text);
         m_outlined = outlined;
+        show();
+        if (changed && parentWidget()->isVisible())
+            m_pop.start(0, 1, Motion::Fade, Motion::spring());
         update();
     }
 
@@ -258,6 +292,12 @@ protected:
     {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
+        const qreal pop = m_pop.value();
+        p.setOpacity(pop);
+        const QPointF c = QRectF(rect()).center();
+        p.translate(c);
+        p.scale(Motion::lerp(0.8, 1.0, pop), Motion::lerp(0.8, 1.0, pop));
+        p.translate(-c);
         const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
         const QPalette pal = palette();
         const bool dark = Chrome::isDark(pal);
@@ -278,13 +318,15 @@ protected:
 
 private:
     bool m_outlined = false;
+    Tween m_pop;
 };
 
 // A magnifier glyph drawn by hand in the accent colour, so it matches in
 // every icon theme. It sits at the left of the search row. While the field
 // asks for text it becomes a speech bubble, while it waits for a key
 // combination a key cap, and while a command's fields are filled in a
-// small form, so the row says what it is doing.
+// small form, so the row says what it is doing. One glyph morphs into the
+// next: the old shrinks away as the new grows into place.
 class SearchGlyph : public QWidget
 {
 public:
@@ -292,13 +334,21 @@ public:
 
     explicit SearchGlyph(QWidget *parent)
         : QWidget(parent)
+        , m_morph(this)
     {
         setFixedSize(26, 26);
+        m_morph.jump(1);
+        m_morph.onStep = [this](qreal) { update(); };
     }
 
     void setMode(Mode mode)
     {
+        if (mode == m_mode)
+            return;
+        m_previous = m_mode;
         m_mode = mode;
+        if (isVisible())
+            m_morph.start(0, 1, Motion::Fade, Motion::spring());
         update();
     }
 
@@ -307,10 +357,29 @@ protected:
     {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
+        const qreal t = m_morph.value();
+        if (t < 1) {
+            // The glyph before, on its way out.
+            p.save();
+            drawGlyph(p, m_previous, 1 - t, Motion::lerp(1.0, 0.6, t));
+            p.restore();
+        }
+        drawGlyph(p, m_mode, t, Motion::lerp(0.6, 1.0, t));
+    }
+
+private:
+    // One glyph at `opacity`, scaled about the centre.
+    void drawGlyph(QPainter &p, Mode mode, qreal opacity, qreal scale)
+    {
+        p.setOpacity(opacity);
+        const QPointF c(13.0, 13.0);
+        p.translate(c);
+        p.scale(scale, scale);
+        p.translate(-c);
         const QColor accent = palette().color(QPalette::Highlight);
         p.setPen(QPen(accent, 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
         p.setBrush(Qt::NoBrush);
-        if (m_mode == Ask) {
+        if (mode == Ask) {
             // A speech bubble with a dot of text in it.
             QPainterPath bubble;
             bubble.addRoundedRect(QRectF(3.5, 4.5, 17, 13), 4.5, 4.5);
@@ -323,7 +392,7 @@ protected:
             p.drawEllipse(QPointF(12.0, 11.0), 1.6, 1.6);
             return;
         }
-        if (m_mode == Listen) {
+        if (mode == Listen) {
             // A key cap with its dot: "press a key".
             p.drawRoundedRect(QRectF(3.5, 6.5, 19, 14), 4, 4);
             p.setPen(Qt::NoPen);
@@ -331,7 +400,7 @@ protected:
             p.drawRoundedRect(QRectF(8.5, 11.5, 9, 2.6), 1.3, 1.3);
             return;
         }
-        if (m_mode == Fill) {
+        if (mode == Fill) {
             // Two fields of a form, the first with a cursor in it.
             p.drawRoundedRect(QRectF(3.5, 4.5, 19, 7), 3, 3);
             p.drawRoundedRect(QRectF(3.5, 14.5, 19, 7), 3, 3);
@@ -340,23 +409,25 @@ protected:
             p.drawRoundedRect(QRectF(7.0, 6.5, 2.0, 3.0), 1.0, 1.0);
             return;
         }
-        const QPointF c(11.0, 11.0);
+        const QPointF lens(11.0, 11.0);
         const qreal radius = 6.5;
-        p.drawEllipse(c, radius, radius);
+        p.drawEllipse(lens, radius, radius);
         const QPointF dir(0.7071, 0.7071);
-        p.drawLine(c + dir * (radius + 1.0), c + dir * (radius + 6.5));
+        p.drawLine(lens + dir * (radius + 1.0), lens + dir * (radius + 6.5));
         // A spark inside the lens: the "lumen".
         p.setPen(Qt::NoPen);
         p.setBrush(Chrome::withAlpha(accent, 150));
-        p.drawEllipse(c + QPointF(-1.5, -1.5), 1.6, 1.6);
+        p.drawEllipse(lens + QPointF(-1.5, -1.5), 1.6, 1.6);
     }
 
-private:
     Mode m_mode = Search;
+    Mode m_previous = Search;
+    Tween m_morph; // 0 → 1 from the previous glyph to the current
 };
 
 // The footer's right side: "Open ↵   Actions Ctrl K", each shortcut drawn
-// as key caps.
+// as key caps. When one of the shortcuts is used, its caps are pressed and
+// released: the footer answers the hand.
 class KeyHints : public QWidget
 {
 public:
@@ -367,8 +438,24 @@ public:
 
     explicit KeyHints(QWidget *parent)
         : QWidget(parent)
+        , m_press(this)
     {
         setFont(Chrome::scaledFont(font(), 0.9));
+        m_press.onStep = [this](qreal) { update(); };
+    }
+
+    // The caps for `keys` go down and come back up.
+    void press(const QString &keys)
+    {
+        if (!isVisible())
+            return;
+        for (const Hint &h : std::as_const(m_hints)) {
+            if (h.keys == keys) {
+                m_pressed = keys;
+                m_press.start(1, 0, Motion::Press, Motion::exit());
+                return;
+            }
+        }
     }
 
     void setHints(const QList<Hint> &hints)
@@ -398,7 +485,8 @@ protected:
             p.setPen(Chrome::mutedText(palette()));
             p.drawText(QRect(x, 0, labelWidth, height()), Qt::AlignVCenter | Qt::AlignLeft, h.label);
             x += labelWidth + LabelGap;
-            x += KeyCaps::draw(p, QRect(x, 0, width() - x, height()), h.keys, palette()) + Gap;
+            const qreal pressed = h.keys == m_pressed && m_press.isRunning() ? m_press.value() : 0;
+            x += KeyCaps::draw(p, QRect(x, 0, width() - x, height()), h.keys, palette(), Qt::AlignLeft, pressed) + Gap;
         }
     }
 
@@ -407,6 +495,8 @@ private:
     static constexpr int LabelGap = 6; // between a label and its caps
     QList<Hint> m_hints;
     int m_width = 0;
+    QString m_pressed; // the hint whose caps are down
+    Tween m_press;     // 1 fully pressed → 0 released
 };
 
 // A field's token: a rounded, slightly inset tint on the glass, ringed
@@ -545,10 +635,18 @@ public:
     explicit ArgumentBar(QWidget *parent)
         : QWidget(parent)
         , m_layout(new QHBoxLayout(this))
+        , m_reveal(this)
     {
         m_layout->setContentsMargins(0, 0, 0, 0);
         m_layout->setSpacing(8);
         hide();
+        // The fields drop into the row together, through a pose effect
+        // that goes once they have landed.
+        m_reveal.onStep = [this](qreal t) {
+            if (auto *effect = dynamic_cast<PoseEffect *>(graphicsEffect()))
+                effect->setPose(Motion::appearing(t, 0.96, -6));
+        };
+        m_reveal.onDone = [this] { setGraphicsEffect(nullptr); };
     }
 
     void setArguments(const QList<Argument> &arguments, const QStringList &initial, QObject *keyFilter)
@@ -580,6 +678,10 @@ public:
         m_layout->addStretch(0);
         restyle();
         show();
+        if (Motion::enabled() && parentWidget()->isVisible()) {
+            setGraphicsEffect(new PoseEffect(this));
+            m_reveal.start(0, 1, Motion::Open, QEasingCurve::Linear); // the pose shapes the curve
+        }
         // Start in the first field still empty.
         int first = 0;
         while (first < m_fields.size() - 1 && !value(first).isEmpty() && arguments.at(first).options.isEmpty())
@@ -599,6 +701,8 @@ public:
 
     void clear()
     {
+        m_reveal.stop();
+        setGraphicsEffect(nullptr);
         qDeleteAll(m_fields);
         m_fields.clear();
         while (QLayoutItem *item = m_layout->takeAt(0))
@@ -652,6 +756,86 @@ private:
     QHBoxLayout *m_layout;
     QList<QWidget *> m_fields;
     QList<Argument> m_arguments;
+    Tween m_reveal;
+};
+
+// The footer's left side: the name of what is open ("Lumen", "Files", the
+// result whose actions are listed), or for a moment a message ("Copied to
+// Clipboard"). A message rises in over the name and the name comes back
+// the same way, so the footer is seen to answer.
+class StatusLine : public QWidget
+{
+public:
+    explicit StatusLine(QWidget *parent)
+        : QWidget(parent)
+        , m_flip(this)
+    {
+        setFont(Chrome::scaledFont(font(), 0.9, QFont::Medium));
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        m_flip.jump(1);
+        m_flip.onStep = [this](qreal) { update(); };
+    }
+
+    QSize sizeHint() const override { return QSize(100, QFontMetrics(font()).height()); }
+
+    // The name of what is open; replaces a message only once it is over.
+    void setName(const QString &name)
+    {
+        m_name = name;
+        if (!m_toast)
+            flipTo(name);
+    }
+
+    // A message for a moment, then the name again.
+    void toast(const QString &message)
+    {
+        m_toast = true;
+        flipTo(message);
+        QTimer::singleShot(1800, this, [this] {
+            m_toast = false;
+            flipTo(m_name);
+        });
+    }
+    bool isToasting() const { return m_toast; }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.setFont(font());
+        const QPalette pal = QGuiApplication::palette(); // the card's tones, whatever the style sheets around
+        p.setPen(Chrome::mutedText(pal));
+        const QFontMetrics fm(font());
+        const qreal t = m_flip.value();
+        if (t < 1) {
+            p.setOpacity(1 - t);
+            p.drawText(QRectF(0, -t * Rise, width(), height()), Qt::AlignVCenter | Qt::AlignLeft, fm.elidedText(m_previous, Qt::ElideRight, width()));
+        }
+        p.setOpacity(t);
+        p.drawText(QRectF(0, (1 - t) * Rise, width(), height()), Qt::AlignVCenter | Qt::AlignLeft, fm.elidedText(m_text, Qt::ElideRight, width()));
+    }
+
+private:
+    static constexpr int Rise = 6; // the new line rises this far, the old one moves on by as much
+
+    void flipTo(const QString &text)
+    {
+        if (text == m_text)
+            return;
+        m_previous = m_text;
+        m_text = text;
+        if (isVisible())
+            m_flip.start(0, 1, Motion::Toast, Motion::entrance());
+        else
+            m_flip.jump(1);
+        update();
+    }
+
+    QString m_name;
+    QString m_text;     // what is shown (or arriving)
+    QString m_previous; // what is on its way out
+    bool m_toast = false;
+    Tween m_flip; // 0 → 1 from the previous line to the current
 };
 
 Launcher::Launcher()
@@ -662,12 +846,15 @@ Launcher::Launcher()
     , m_chip(new ViewChip(m_card))
     , m_args(new ArgumentBar(m_card))
     , m_search(new QLineEdit(m_card))
-    , m_list(new QListView(m_card))
+    , m_list(new ResultList(m_card))
     , m_model(new ResultModel(this))
-    , m_status(new QLabel(m_card))
+    , m_status(new StatusLine(m_card))
     , m_hints(new KeyHints(m_card))
     , m_toggleAction(new QAction(tr("Show Lumen"), this))
     , m_hud(new Hud)
+    , m_opening(this)
+    , m_cardWidth(this)
+    , m_glow(this)
 {
     setWindowTitle(QStringLiteral("Lumen"));
     Theme::applySaved();
@@ -677,7 +864,8 @@ Launcher::Launcher()
     m_time = new TimeSource(this, m_timekeeper);
     m_calendar = new CalendarSource(this);
     m_focus = new FocusMode(this, m_timekeeper);
-    m_rootSources = {new KRunnerSource(this), m_builtin, new AnswerSource(this), m_system, new ScriptSource(this, m_library), new ScriptCommandSource(this), new WindowLayoutSource(this, m_library), m_focus, new BrowserHistory(this, false), new AppSource(this), m_time, m_calendar, new WeatherSource(this), new DevSource(this), new ProjectSource(this), new DesktopSource(this), new ScreenTools(this), new MonitorSource(this)};
+    m_awake = new KeepAwake(this);
+    m_rootSources = {new KRunnerSource(this), m_builtin, new AnswerSource(this), m_system, new ScriptSource(this, m_library), new ScriptCommandSource(this), new WindowLayoutSource(this, m_library), m_focus, new BrowserHistory(this, false), new PackageRootSource(this), new AppQuitSource(this, false), m_awake, new LanguageSource(this), new NetworkSource(this), new DisplaySource(this), new PhoneSource(this), new AppSource(this), m_time, m_calendar, new WeatherSource(this), new DevSource(this), new ProjectSource(this), new DesktopSource(this), new ScreenTools(this), new MonitorSource(this)};
     m_pasteStack = new PasteStack(this, m_clipboard);
     m_views = {
         {PasteStackView, new PasteStackSource(this, m_pasteStack)},
@@ -686,6 +874,8 @@ Launcher::Launcher()
         {HistoryView, new BrowserHistory(this, true)},
         {CalculationsView, new CalcHistory(this)},
         {ThemeView, new ThemeSource(this)},
+        {PackagesView, new PackageSource(this, new PackageManager(this))},
+        {AppsView, new AppQuitSource(this, true)},
         {ClipboardView, new ClipboardSource(this, m_clipboard)},
         {FilesView, new FileSource(this)},
         {SnippetsView, new SnippetsSource(this, m_builtin)},
@@ -730,7 +920,26 @@ Launcher::Launcher()
     // The empty state is painted on the card behind the (empty) list.
     connect(m_model, &QAbstractItemModel::modelReset, this, qOverload<>(&QWidget::update));
 
-    m_status->setFont(Chrome::scaledFont(m_status->font(), 0.9, QFont::Medium));
+    // The card's motion. While it opens, the card's widgets are drawn
+    // through a pose effect and the card's body with the same pose (see
+    // paintEvent); the effect goes once the card has settled.
+    m_opening.onStep = [this](qreal t) {
+        m_pose = Motion::appearing(t, 0.94, -CardDrop);
+        if (auto *effect = dynamic_cast<PoseEffect *>(m_card->graphicsEffect()))
+            effect->setPose(m_pose);
+        update();
+    };
+    m_opening.onDone = [this] {
+        m_card->setGraphicsEffect(nullptr); // effects slow painting down; only while animating
+        m_pose = Motion::Pose();
+        update();
+    };
+    m_cardWidth.jump(CardSize.width());
+    m_cardWidth.onStep = [this](qreal) {
+        layoutCard();
+        update();
+    };
+    m_glow.onStep = [this](qreal) { update(); };
 
     auto *searchRow = new QHBoxLayout;
     searchRow->setContentsMargins(Pad + 10, 12, Pad + 12, 10);
@@ -824,7 +1033,7 @@ void Launcher::restyle()
     m_search->setStyleSheet(QStringLiteral("QLineEdit { background: transparent; color: %1; "
                                            "placeholder-text-color: %2; padding: 0; }")
                                 .arg(pal.color(QPalette::WindowText).name(), muted.name()));
-    m_status->setStyleSheet(QStringLiteral("color: %1").arg(muted.name(QColor::HexArgb)));
+    m_status->update();
     m_args->restyle();
     m_pane->restyle();
     // A thin pill scrollbar without buttons, hugging the well's right edge.
@@ -885,6 +1094,8 @@ bool Launcher::showView(const QString &name, const QString &query)
         {QStringLiteral("history"), HistoryView},
         {QStringLiteral("calculations"), CalculationsView},
         {QStringLiteral("theme"), ThemeView},
+        {QStringLiteral("packages"), PackagesView},
+        {QStringLiteral("apps"), AppsView},
     };
     if (!names.contains(name))
         return false;
@@ -931,40 +1142,27 @@ void Launcher::showWithQuery(const QString &query)
     }
     m_search->setText(query);
     textChanged(query);
+    const bool opening = !isVisible();
     show();
     raise();
     activateWindow();
     m_search->setFocus();
-    animateIn();
+    if (opening)
+        animateIn();
 }
 
-// The card drops in by a few pixels and fades in, quickly; KDE's animation
-// speed setting scales it, and "instant" turns it off.
+// The card springs open: a little smaller, a little higher and transparent
+// at first, it drops into place, a touch past full size, and settles. The
+// field takes keys from the first frame. KDE's animation speed setting
+// scales it, and "instant" turns it off.
 void Launcher::animateIn()
 {
-    const qreal factor = KSharedConfig::openConfig(QStringLiteral("kdeglobals"))->group(QStringLiteral("KDE")).readEntry("AnimationDurationFactor", 1.0);
-    if (!m_overlay || factor <= 0)
+    if (!Motion::enabled()) {
+        m_pose = Motion::Pose();
         return;
-    auto *effect = new QGraphicsOpacityEffect(m_card);
-    m_card->setGraphicsEffect(effect);
-    auto *animation = new QPropertyAnimation(this, "appear", this);
-    animation->setStartValue(0.0);
-    animation->setEndValue(1.0);
-    animation->setDuration(int(130 * factor));
-    animation->setEasingCurve(QEasingCurve::OutCubic);
-    connect(animation, &QPropertyAnimation::finished, this, [this] {
-        m_card->setGraphicsEffect(nullptr); // effects slow painting down; only while animating
-    });
-    animation->start(QAbstractAnimation::DeleteWhenStopped);
-}
-
-void Launcher::setAppear(qreal appear)
-{
-    m_appear = appear;
-    if (auto *effect = qobject_cast<QGraphicsOpacityEffect *>(m_card->graphicsEffect()))
-        effect->setOpacity(appear);
-    layoutCard();
-    update();
+    }
+    m_card->setGraphicsEffect(new PoseEffect(m_card));
+    m_opening.start(0, 1, Motion::Open, QEasingCurve::Linear); // the pose shapes the curve
 }
 
 void Launcher::hideLauncher()
@@ -975,6 +1173,12 @@ void Launcher::hideLauncher()
     m_closedAt = QDateTime::currentDateTime();
     m_closedView = m_views.key(m_view, RootView) == RootView ? nullptr : m_view;
     m_closedQuery = m_prompt || m_actionsShown ? m_savedQuery : m_search->text();
+    // The window goes at once (focus and keys return to the previous app
+    // immediately); a picture of the card shrinks away in its place.
+    m_opening.stop();
+    m_card->setGraphicsEffect(nullptr);
+    m_pose = Motion::Pose();
+    Ghost::dismiss(this, m_card->geometry().marginsAdded(QMargins(Shadow, Shadow, Shadow, Shadow + ShadowDrop)) & rect());
     hide();
     for (Source *s : m_rootSources + m_views.values())
         s->sessionEnded();
@@ -1014,10 +1218,8 @@ void Launcher::layoutCard()
         m_card->setGeometry(rect().marginsRemoved(QMargins(Shadow, Shadow, Shadow, Shadow)));
         return;
     }
-    const int wanted = m_pane->isVisibleTo(m_card) ? PaneCardWidth : CardSize.width();
-    const QSize card(qMin(wanted, width() * 9 / 10), qMin(CardSize.height(), height() * 8 / 10));
-    const int drop = qRound((1 - m_appear) * 14); // see animateIn()
-    m_card->setGeometry((width() - card.width()) / 2, height() / 5 - drop, card.width(), card.height());
+    const QSize card(qMin(qRound(m_cardWidth.value()), width() * 9 / 10), qMin(CardSize.height(), height() * 8 / 10));
+    m_card->setGeometry((width() - card.width()) / 2, height() / 5, card.width(), card.height());
 }
 
 void Launcher::updatePane()
@@ -1025,9 +1227,15 @@ void Launcher::updatePane()
     const bool show = m_view && m_view->hasPreviewPane() && !m_actionsShown;
     if (show != m_pane->isVisibleTo(m_card)) {
         m_pane->setVisible(show);
+        const int width = show ? PaneCardWidth : CardSize.width();
         if (!m_overlay) {
-            const int width = show ? PaneCardWidth : CardSize.width();
+            // A window of its own: it takes the new size at once.
+            m_cardWidth.jump(width);
             resize(QSize(width, CardSize.height()).grownBy(QMargins(Shadow, Shadow, Shadow, Shadow)));
+        } else if (isVisible()) {
+            m_cardWidth.to(width, Motion::Resize, Motion::entrance()); // the card eases wider or narrower
+        } else {
+            m_cardWidth.jump(width);
         }
         layoutCard();
         update();
@@ -1067,10 +1275,18 @@ void Launcher::paintEvent(QPaintEvent *)
 {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    p.setOpacity(m_appear); // the card's own painting fades with its contents
     const QPalette pal = palette();
     const bool dark = Chrome::isDark(pal);
     const QRect cardRect = m_card->geometry();
+    // While the card opens, its body takes the same pose as its widgets
+    // (scaled about the centre, shifted, faded), so the two stay one card.
+    if (m_pose.scale != 1 || m_pose.dy != 0 || m_pose.opacity != 1) {
+        const QPointF centre = QRectF(cardRect).center();
+        p.setOpacity(m_pose.opacity);
+        p.translate(centre.x(), centre.y() + m_pose.dy);
+        p.scale(m_pose.scale, m_pose.scale);
+        p.translate(-centre);
+    }
     const QRectF body = QRectF(cardRect).adjusted(0.5, 0.5, -0.5, -0.5);
     QRect content = m_list->geometry();
     if (m_pane->isVisibleTo(m_card))
@@ -1080,13 +1296,15 @@ void Launcher::paintEvent(QPaintEvent *)
 
     if (m_prompt && !m_args->isVisibleTo(m_card)) {
         // The field is asking something: an accent-tinted outline around
-        // the search row marks it as the place to answer. (Argument fields
-        // are tokens that ring themselves.)
+        // the search row marks it as the place to answer, glowing up as the
+        // question is put. (Argument fields are tokens that ring themselves.)
+        const qreal glow = m_glow.value();
         const QRect row = (m_glyph->geometry() | m_search->geometry()).translated(cardRect.topLeft()).adjusted(-9, -5, 9, 5);
         const QColor accent = pal.color(QPalette::Highlight);
-        p.setPen(QPen(Chrome::withAlpha(accent, dark ? 150 : 120), 1.0));
-        p.setBrush(Chrome::withAlpha(accent, dark ? 30 : 18));
-        p.drawRoundedRect(QRectF(row).adjusted(0.5, 0.5, -0.5, -0.5), 11, 11);
+        p.setPen(QPen(Chrome::withAlpha(accent, qRound((dark ? 150 : 120) * glow)), 1.0));
+        p.setBrush(Chrome::withAlpha(accent, qRound((dark ? 30 : 18) * glow)));
+        const qreal spread = (1 - glow) * 3; // closes in on the row as it brightens
+        p.drawRoundedRect(QRectF(row).adjusted(0.5 - spread, 0.5 - spread, -0.5 + spread, -0.5 + spread), 11 + spread, 11 + spread);
     }
 
     // The result well: a toned stage inset in the card, like Quick Look's
@@ -1129,6 +1347,7 @@ void Launcher::openView(View view, const QString &query)
 {
     dropViews();
     m_forward.clear(); // somewhere new: nothing ahead any more
+    revealList(view == RootView ? ResultList::FromLeft : ResultList::FromRight);
     setView(m_views.value(view), query);
 }
 
@@ -1140,6 +1359,7 @@ void Launcher::pushView(Source *source, const QString &query)
     }
     connectSource(source);
     m_forward.clear();
+    revealList(ResultList::FromRight);
     if (m_view)
         m_viewStack.append({m_view, m_search->text()});
     else
@@ -1182,6 +1402,7 @@ bool Launcher::goBack()
         openView(RootView);
     } else {
         const auto [below, query] = m_viewStack.takeLast();
+        revealList(ResultList::FromLeft);
         setView(below, query);
     }
     // Pushed views are deleted on leaving; the others can be returned to.
@@ -1199,15 +1420,26 @@ void Launcher::goForward()
     const auto [view, query] = m_forward.takeLast();
     if (m_view)
         m_viewStack.append({m_view, m_search->text()});
+    revealList(ResultList::FromRight);
     setView(view, query);
+}
+
+// The next results slide in from the side the navigation went, unless the
+// card is still opening (one motion at a time).
+void Launcher::revealList(int how)
+{
+    if (isVisible() && !m_opening.isRunning())
+        m_list->revealNext(ResultList::Reveal(how));
 }
 
 void Launcher::setView(Source *source, const QString &query)
 {
     m_view = source;
     m_actionsShown = false;
-    m_chip->setText(m_view ? m_view->viewTitle() : QString());
-    m_chip->setVisible(m_view);
+    if (m_view)
+        m_chip->present(m_view->viewTitle(), false);
+    else
+        m_chip->hide();
     m_search->setPlaceholderText(m_view ? m_view->viewPlaceholder() : tr("Search apps, commands, files…"));
     const QSignalBlocker block(m_search);
     m_search->setText(query);
@@ -1288,7 +1520,7 @@ void Launcher::showRootResults()
         for (Item &item : all)
             item.score = m_usage.boost(item.id);
         // Timers, the next meeting, what is playing, favourites, then commands.
-        all = m_focus->startItems() + m_time->startItems() + m_calendar->startItems()
+        all = m_focus->startItems() + m_awake->startItems() + m_time->startItems() + m_calendar->startItems()
             + static_cast<PasteStackSource *>(m_views.value(PasteStackView))->startItems() + m_system->startItems() + favouriteItems() + all;
     } else {
         for (auto it = m_rootResults.cbegin(); it != m_rootResults.cend(); ++it)
@@ -1411,22 +1643,25 @@ void Launcher::showActions(bool show)
         m_actionsItem = *item;
         m_savedQuery = m_search->text();
         m_actionsShown = true;
-        m_chip->setText(tr("Actions"));
-        m_chip->show();
+        m_chip->present(tr("Actions"), false);
         m_search->setPlaceholderText(tr("Search actions for “%1”…").arg(item->title));
         const QSignalBlocker block(m_search);
         m_search->clear();
+        revealList(ResultList::FromBelow); // the actions pop up over the results
         textChanged({});
     } else {
         m_actionsShown = false;
-        m_chip->setText(m_view ? m_view->viewTitle() : QString());
-        m_chip->setVisible(m_view);
+        if (m_view)
+            m_chip->present(m_view->viewTitle(), false);
+        else
+            m_chip->hide();
         m_search->setPlaceholderText(m_view ? m_view->viewPlaceholder() : tr("Search apps, commands, files…"));
         // Return to the result whose actions were shown, once the (possibly
         // asynchronous) results are back.
         m_reselectId = m_actionsItem.id;
         const QSignalBlocker block(m_search);
         m_search->setText(m_savedQuery);
+        revealList(ResultList::FadeIn);
         textChanged(m_savedQuery);
     }
     updatePane();
@@ -1472,7 +1707,7 @@ void Launcher::selectionChanged()
         if (item && !item->filePath.isEmpty())
             m_preview->showFile(item->filePath);
         else
-            m_preview->hide();
+            m_preview->dismiss();
     }
     updateFooter();
 }
@@ -1490,16 +1725,16 @@ void Launcher::moveSelection(int delta)
 void Launcher::updateFooter()
 {
     const Item *item = selectedItem();
-    if (m_status->property("toast").toBool())
+    m_status->setName(m_actionsShown ? m_actionsItem.title : m_view ? m_view->viewTitle() : QStringLiteral("Lumen"));
+    if (m_status->isToasting())
         return;
-    m_status->setText(m_actionsShown ? m_actionsItem.title : m_view ? m_view->viewTitle() : QStringLiteral("Lumen"));
 
     QList<KeyHints::Hint> hints;
     if (m_prompt) {
         // Answering a question: Enter answers (a key combination answers
         // by itself), Esc goes back to the search.
         if (m_prompt->onKeys)
-            m_status->setText(tr("Waiting for a key combination…"));
+            m_status->setName(tr("Waiting for a key combination…"));
         else if (m_prompt->onArguments && m_args->count() > 1)
             hints << KeyHints::Hint{tr("Next"), QStringLiteral("Tab")} << KeyHints::Hint{tr("Run"), QStringLiteral("↵")};
         else
@@ -1525,12 +1760,13 @@ void Launcher::notify(const QString &message)
         m_hud->flash(message);
         return;
     }
-    m_status->setText(message);
-    m_status->setProperty("toast", true);
-    QTimer::singleShot(1800, this, [this] {
-        m_status->setProperty("toast", false);
-        updateFooter();
-    });
+    m_status->toast(message);
+}
+
+// The footer's key cap for a shortcut just used goes down and comes up.
+void Launcher::pressHint(const QString &keys)
+{
+    m_hints->press(keys);
 }
 
 // ---------------------------------------------------------------- keys
@@ -1560,8 +1796,10 @@ bool Launcher::handleKey(QKeyEvent *event)
 
     // Ctrl+Y previews any local file, also while typing.
     if (pressed == QKeySequence(Qt::CTRL | Qt::Key_Y)) {
-        if (const Item *item = selectedItem(); item && !item->filePath.isEmpty() && !m_actionsShown)
+        if (const Item *item = selectedItem(); item && !item->filePath.isEmpty() && !m_actionsShown) {
+            pressHint(keyText(pressed));
             quickLook(item->filePath);
+        }
         return true;
     }
 
@@ -1569,11 +1807,13 @@ bool Launcher::handleKey(QKeyEvent *event)
     // arrow keys (before that it types a space), and closes an open preview.
     if (event->key() == Qt::Key_Space && event->modifiers() == Qt::NoModifier) {
         if (m_preview->isVisible()) {
-            m_preview->hide();
+            pressHint(tr("Space"));
+            m_preview->dismiss();
             return true;
         }
         const Item *item = selectedItem();
         if (m_userMoved && !m_actionsShown && item && !item->filePath.isEmpty()) {
+            pressHint(tr("Space"));
             quickLook(item->filePath);
             return true;
         }
@@ -1582,6 +1822,7 @@ bool Launcher::handleKey(QKeyEvent *event)
 
     if (m_prompt) {
         if (event->key() == Qt::Key_Escape) {
+            pressHint(QStringLiteral("Escape"));
             endPrompt();
             setQuery(m_savedQuery);
             return true;
@@ -1598,6 +1839,7 @@ bool Launcher::handleKey(QKeyEvent *event)
             return true;
         }
         if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+            pressHint(QStringLiteral("↵"));
             const QString answer = m_search->text();
             const auto done = m_prompt->onText;
             endPrompt();
@@ -1623,6 +1865,7 @@ bool Launcher::handleKey(QKeyEvent *event)
         return true;
     case Qt::Key_Return:
     case Qt::Key_Enter:
+        pressHint(QStringLiteral("↵"));
         runSelected(0);
         return true;
     case Qt::Key_Tab:
@@ -1635,6 +1878,7 @@ bool Launcher::handleKey(QKeyEvent *event)
         return true;
     case Qt::Key_K:
         if (event->modifiers() == Qt::ControlModifier) {
+            pressHint(keyText(pressed));
             showActions(!m_actionsShown);
             return true;
         }
@@ -1653,7 +1897,7 @@ bool Launcher::handleKey(QKeyEvent *event)
         break;
     case Qt::Key_Escape:
         if (m_preview->isVisible())
-            m_preview->hide();
+            m_preview->dismiss();
         else if (m_actionsShown)
             showActions(false);
         else if (!goBack())
@@ -1698,6 +1942,7 @@ void Launcher::setClipboardImage(const QString &pngPath)
 void Launcher::copyText(const QString &text)
 {
     setClipboardText(text);
+    m_list->pulse();
     notify(tr("Copied to Clipboard"));
 }
 
@@ -1855,7 +2100,7 @@ void Launcher::copyUrls(const QList<QUrl> &urls)
 void Launcher::quickLook(const QString &path)
 {
     if (m_preview->isVisible() && m_preview->currentFile() == path) {
-        m_preview->hide();
+        m_preview->dismiss();
     } else {
         m_preview->showFile(path);
         m_preview->raise();
@@ -1941,6 +2186,11 @@ KService::Ptr Launcher::serviceFor(const Item &item) const
     return apps.isEmpty() ? KService::Ptr() : apps.first();
 }
 
+void Launcher::openUrl(const QUrl &url)
+{
+    (new KIO::OpenUrlJob(url))->start();
+}
+
 void Launcher::launchApp(const QString &storageId)
 {
     if (const KService::Ptr app = KService::serviceByStorageId(storageId))
@@ -1951,6 +2201,7 @@ void Launcher::toggleFavourite(const Item &item)
 {
     QList<Library::Favourite> favourites = m_library->favourites();
     const auto it = std::find_if(favourites.begin(), favourites.end(), [&](const Library::Favourite &f) { return f.id == item.id; });
+    m_list->pulse(); // the row answers either way
     if (it != favourites.end()) {
         QFile::remove(QDir(m_library->folder() + QStringLiteral("/icons")).filePath(it->iconFile));
         favourites.erase(it);
@@ -2095,10 +2346,12 @@ void Launcher::startPrompt(const QString &chip, const QString &placeholder, cons
         showActions(false);
     m_prompt = prompt;
     m_savedQuery = m_search->text();
-    m_chip->setText(chip);
-    m_chip->setOutlined(true);
-    m_chip->show();
+    m_chip->present(chip, true);
     m_glyph->setMode(prompt.onKeys ? SearchGlyph::Listen : SearchGlyph::Ask);
+    if (isVisible())
+        m_glow.start(0, 1, Motion::Fade, Motion::exit());
+    else
+        m_glow.jump(1);
     m_search->setPlaceholderText(placeholder);
     m_search->setEchoMode(secret ? QLineEdit::Password : QLineEdit::Normal);
     const QSignalBlocker block(m_search);
@@ -2120,10 +2373,12 @@ void Launcher::endPrompt()
     m_search->setEchoMode(QLineEdit::Normal);
     const QSignalBlocker block(m_search);
     m_search->clear(); // never leave a typed password in the field
-    m_chip->setText(m_view ? m_view->viewTitle() : QString());
-    m_chip->setOutlined(false);
-    m_chip->setVisible(m_view);
+    if (m_view)
+        m_chip->present(m_view->viewTitle(), false);
+    else
+        m_chip->hide();
     m_glyph->setMode(SearchGlyph::Search);
+    m_glow.jump(0);
     m_search->setPlaceholderText(m_view ? m_view->viewPlaceholder() : tr("Search apps, commands, files…"));
     update();
 }

@@ -6,8 +6,9 @@
 #include <QGuiApplication>
 #include <QMimeData>
 #include <QPainter>
-#include <QUrl>
 #include <QPainterPath>
+#include <QTimer>
+#include <QUrl>
 
 #include <algorithm>
 #include <cmath>
@@ -206,31 +207,37 @@ int width(const QFont &base, const QString &keys)
     return total;
 }
 
-int draw(QPainter &p, const QRect &rect, const QString &keys, const QPalette &palette, Qt::Alignment align)
+int draw(QPainter &p, const QRect &rect, const QString &keys, const QPalette &palette, Qt::Alignment align, qreal pressed)
 {
     const QFont font = capFont(p.font());
     const QFontMetrics fm(font);
     const int h = height(p.font());
     const int total = width(p.font(), keys);
     const bool dark = Chrome::isDark(palette);
+    const QColor accent = palette.color(QPalette::Highlight);
 
     p.save();
     p.setRenderHint(QPainter::Antialiasing);
     p.setFont(font);
     // A cap is a light rounded tile with a slightly heavier bottom edge, so
-    // it reads as a key rather than a chip.
-    const QColor face = dark ? Chrome::withAlpha(Qt::white, 24) : Chrome::withAlpha(Qt::white, 235);
-    const QColor edge = Chrome::withAlpha(palette.color(QPalette::WindowText), dark ? 70 : 60);
-    const QColor ink = Chrome::mix(palette.color(QPalette::WindowText), palette.color(QPalette::Window), 0.1);
+    // it reads as a key rather than a chip. Pressed, it sinks onto that
+    // edge and takes a wash of the accent.
+    const QColor face = Chrome::mix(dark ? Chrome::withAlpha(Qt::white, 24) : Chrome::withAlpha(Qt::white, 235),
+                                    Chrome::withAlpha(accent, dark ? 120 : 70), pressed);
+    const QColor edge = Chrome::mix(Chrome::withAlpha(palette.color(QPalette::WindowText), dark ? 70 : 60),
+                                    Chrome::withAlpha(accent, dark ? 160 : 120), pressed);
+    const QColor ink = Chrome::mix(Chrome::mix(palette.color(QPalette::WindowText), palette.color(QPalette::Window), 0.1),
+                                   dark ? accent.lighter(135) : accent.darker(130), pressed);
+    const qreal sink = 1.5 * pressed; // how far the cap has gone down
     qreal x = align & Qt::AlignRight ? rect.right() + 1 - total : rect.left();
     const qreal y = rect.top() + (rect.height() - h) / 2.0;
     const QStringList keyList = tokens(keys);
     for (const QString &key : keyList) {
         const int w = capWidth(fm, key, h);
-        const QRectF cap(x + 0.5, y + 0.5, w - 1, h - 2);
+        const QRectF cap(x + 0.5, y + 0.5 + sink, w - 1, h - 2);
         p.setPen(Qt::NoPen);
         p.setBrush(edge);
-        p.drawRoundedRect(cap.translated(0, 1.5), CapRadius, CapRadius);
+        p.drawRoundedRect(cap.translated(0, 1.5 - sink), CapRadius, CapRadius);
         p.setPen(QPen(edge, 1.0));
         p.setBrush(face);
         p.drawRoundedRect(cap, CapRadius, CapRadius);
@@ -257,6 +264,9 @@ constexpr int BarHeight = 3;     // the fraction bar under a card's text
 constexpr int BarWidth = 140;
 constexpr int ForecastIcon = 22; // a forecast row's bare icon
 constexpr int CaptionInset = 14; // caption and divider inset from the row highlight
+constexpr int SettleRise = 7;    // how far below its place a new row starts
+constexpr int SlideDistance = 28; // how far aside a view's content starts
+constexpr int SettleRows = 7;    // rows staggered one after the other; the rest arrive with the last
 
 // A five-pointed star centred on c.
 QPainterPath starPath(const QPointF &c, qreal outer)
@@ -459,19 +469,17 @@ void ResultDelegate::paint(QPainter *p, const QStyleOptionViewItem &option, cons
     }
     const QRect r = itemRect.adjusted(RowInset, 1, -RowInset, -1);
 
-    if (selected) {
-        // Accent-tinted fill with a hairline of the accent around it, and a
-        // short solid accent bar on the left edge as the selection marker.
-        const QRectF fillRect = QRectF(r).adjusted(0.5, 0.5, -0.5, -0.5);
-        p->setPen(QPen(Chrome::withAlpha(accent, dark ? 110 : 90), 1.0));
-        p->setBrush(Chrome::withAlpha(accent, dark ? 64 : 44));
-        p->drawRoundedRect(fillRect, RowRadius, RowRadius);
-        p->setPen(Qt::NoPen);
-        p->setBrush(accent);
-        const int markerHeight = r.height() - 18;
-        p->drawRoundedRect(QRectF(r.left() + 5, r.center().y() - markerHeight / 2.0 + 0.5, MarkerWidth, markerHeight),
-                           MarkerWidth / 2.0, MarkerWidth / 2.0);
-    } else if (option.state & QStyle::State_MouseOver) {
+    // A row that has just arrived rises into place as it fades in; the list
+    // says how far it has come. (The selected row's highlight is the list's
+    // too, painted under this.)
+    if (const auto *list = qobject_cast<const ResultList *>(option.widget)) {
+        if (const qreal settled = list->settled(index); settled < 1) {
+            p->setOpacity(settled);
+            p->translate(0, (1 - settled) * SettleRise);
+        }
+    }
+
+    if (!selected && option.state & QStyle::State_MouseOver) {
         p->setPen(Qt::NoPen);
         p->setBrush(Chrome::withAlpha(pal.color(QPalette::WindowText), dark ? 14 : 10));
         p->drawRoundedRect(r, RowRadius, RowRadius);
@@ -652,4 +660,264 @@ void ResultDelegate::paintForecast(QPainter *p, const QStyleOptionViewItem &opti
     p->setPen(option.palette.color(QPalette::Text));
     p->drawText(QRect(x, area.top(), highW, area.height()), Qt::AlignVCenter | Qt::AlignLeft, high);
     paintTitle(p, option, QRect(area.left(), area.top(), x - 14 - area.left(), area.height()), title, subtitle);
+}
+
+// -------------------------------------------------------------------- list
+
+ResultList::ResultList(QWidget *parent)
+    : QListView(parent)
+    , m_glide(this)
+    , m_pulse(this)
+    , m_settleTicker(this)
+    , m_slide(this)
+{
+    m_clock.start();
+    m_glide.onStep = [this](qreal) { viewport()->update(); };
+    m_pulse.onStep = [this](qreal) { viewport()->update(); };
+    m_settleTicker.onStep = [this](qreal) { viewport()->update(); };
+    m_settleTicker.onDone = [this] {
+        m_settleStart.clear();
+        viewport()->update();
+    };
+    m_slide.onStep = [this](qreal) { viewport()->update(); };
+    m_slide.onDone = [this] {
+        m_slidePicture = QPixmap();
+        viewport()->update();
+    };
+}
+
+void ResultList::setModel(QAbstractItemModel *model)
+{
+    if (this->model())
+        this->model()->disconnect(this);
+    QListView::setModel(model);
+    if (model) {
+        connect(model, &QAbstractItemModel::modelAboutToBeReset, this, &ResultList::aboutToReset);
+        connect(model, &QAbstractItemModel::modelReset, this, &ResultList::wasReset);
+    }
+}
+
+void ResultList::revealNext(Reveal how)
+{
+    if (!isVisible() || !Motion::enabled())
+        return;
+    m_reveal = how;
+    m_revealAsked = m_clock.elapsed();
+}
+
+void ResultList::pulse()
+{
+    if (isVisible() && currentIndex().isValid())
+        m_pulse.start(1, 0, Motion::Pulse, Motion::exit());
+}
+
+qreal ResultList::settled(const QModelIndex &index) const
+{
+    if (m_settleStart.isEmpty())
+        return 1;
+    const auto it = m_settleStart.constFind(index.data(ResultModel::IdRole).toString());
+    if (it == m_settleStart.constEnd())
+        return 1;
+    const qint64 duration = Motion::ms(Motion::Settle);
+    if (duration <= 0)
+        return 1;
+    const qreal t = std::clamp(qreal(m_clock.elapsed() - *it) / duration, 0.0, 1.0);
+    return Motion::entrance().valueForProgress(t);
+}
+
+// The ids present now, so the rows of the next results that are new can be
+// told from those that merely moved.
+void ResultList::aboutToReset()
+{
+    m_idsBefore.clear();
+    if (const auto *results = qobject_cast<const ResultModel *>(model()))
+        for (const Item &item : results->items())
+            m_idsBefore.insert(item.id);
+}
+
+void ResultList::wasReset()
+{
+    const auto *results = qobject_cast<const ResultModel *>(model());
+    const qint64 now = m_clock.elapsed();
+    if (!results || results->items().isEmpty()) {
+        m_highlightShown = false; // nothing to glide from next time
+        m_settleStart.clear();
+        m_settleTicker.stop();
+        return;
+    }
+    // A reveal asked for just before these results: slide them in as a
+    // whole. (A reveal nobody's results followed is forgotten, so typing
+    // later does not slide.)
+    const bool reveal = m_revealAsked >= 0 && now - m_revealAsked < 400;
+    m_revealAsked = -1;
+    if (reveal) {
+        m_settleStart.clear();
+        m_settleTicker.stop();
+        m_highlightShown = false; // the highlight comes in with the content
+        m_slide.start(0, 1, Motion::Slide, Motion::entrance());
+        scheduleCapture();
+        return;
+    }
+    if (!isVisible() || !Motion::enabled() || m_slide.isRunning())
+        return;
+    // Rows that were not here before settle in, one shortly after the
+    // other. A row that was already settling keeps its timing, so a new
+    // set of results arriving mid-way never restarts what is on screen.
+    QHash<QString, qint64> starts;
+    int fresh = 0;
+    for (const Item &item : results->items()) {
+        if (const auto kept = m_settleStart.constFind(item.id); kept != m_settleStart.constEnd()) {
+            starts.insert(item.id, *kept);
+        } else if (!m_idsBefore.contains(item.id)) {
+            starts.insert(item.id, now + Motion::ms(Motion::SettleStagger) * qMin(fresh, SettleRows));
+            ++fresh;
+        }
+    }
+    m_settleStart = starts;
+    if (!m_settleStart.isEmpty()) // repaint until the last of them has settled
+        m_settleTicker.start(0, 1, Motion::SettleStagger * SettleRows + Motion::Settle, QEasingCurve::Linear);
+}
+
+QRectF ResultList::highlightRect(const QModelIndex &index) const
+{
+    QRect row = visualRect(index);
+    if (!index.data(ResultModel::CaptionRole).toString().isEmpty())
+        row.setTop(row.top() + ResultDelegate::CaptionBand);
+    return QRectF(row.adjusted(RowInset, 1, -RowInset, -1));
+}
+
+QRectF ResultList::currentHighlight() const
+{
+    const QRectF target = highlightRect(currentIndex());
+    if (!m_glide.isRunning())
+        return target;
+    // The target is read live: the rows may have moved during the glide.
+    const qreal t = m_glide.value();
+    return QRectF(Motion::lerp(m_glideFrom.left(), target.left(), t), Motion::lerp(m_glideFrom.top(), target.top(), t),
+                  Motion::lerp(m_glideFrom.width(), target.width(), t), Motion::lerp(m_glideFrom.height(), target.height(), t));
+}
+
+void ResultList::currentChanged(const QModelIndex &current, const QModelIndex &previous)
+{
+    QListView::currentChanged(current, previous); // scrolls the row into view first
+    if (m_slide.isRunning())
+        scheduleCapture(); // the highlight is part of the sliding picture
+    if (!current.isValid())
+        return;
+    if (m_highlightShown && isVisible() && Motion::enabled()) {
+        // From where the highlight was last drawn (mid-glide included).
+        m_glideFrom = m_drawn;
+        if (m_glideFrom != highlightRect(current))
+            m_glide.start(0, 1, Motion::Glide, Motion::glide());
+    } else {
+        m_glide.stop();
+    }
+    viewport()->update();
+}
+
+void ResultList::scrollContentsBy(int dx, int dy)
+{
+    // Keeps a glide in step with the content.
+    m_glideFrom.translate(dx, dy);
+    m_drawn.translate(dx, dy);
+    QListView::scrollContentsBy(dx, dy);
+    if (m_slide.isRunning())
+        scheduleCapture();
+}
+
+void ResultList::scheduleCapture()
+{
+    if (m_captureQueued)
+        return;
+    m_captureQueued = true;
+    QTimer::singleShot(0, this, &ResultList::captureSlide);
+}
+
+void ResultList::captureSlide()
+{
+    m_captureQueued = false;
+    if (!m_slide.isRunning())
+        return;
+    const qreal dpr = viewport()->devicePixelRatioF();
+    m_slidePicture = QPixmap(viewport()->size() * dpr);
+    m_slidePicture.setDevicePixelRatio(dpr);
+    m_slidePicture.fill(Qt::transparent);
+    m_capturing = true;
+    viewport()->render(&m_slidePicture, QPoint(), QRegion(), QWidget::DrawChildren);
+    m_capturing = false;
+    viewport()->update();
+}
+
+void ResultList::hideEvent(QHideEvent *event)
+{
+    QListView::hideEvent(event);
+    m_glide.stop();
+    m_pulse.stop();
+    m_slide.stop();
+    m_settleTicker.stop();
+    m_settleStart.clear();
+    m_highlightShown = false;
+}
+
+// The selected row's highlight: an accent-tinted fill with a hairline of
+// the accent around it and a short solid accent bar on its left edge. A
+// pulse deepens the tint for a moment.
+void ResultList::paintHighlight(QPainter &p, const QRectF &r) const
+{
+    const QPalette pal = QGuiApplication::palette();
+    const bool dark = Chrome::isDark(pal);
+    const QColor accent = pal.color(QPalette::Highlight);
+    const qreal pulse = m_pulse.isRunning() ? m_pulse.value() : 0;
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(QPen(Chrome::withAlpha(accent, qRound(Motion::lerp(dark ? 110 : 90, 220, pulse))), 1.0));
+    p.setBrush(Chrome::withAlpha(accent, qRound(Motion::lerp(dark ? 64 : 44, dark ? 150 : 110, pulse))));
+    p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), RowRadius, RowRadius);
+    p.setPen(Qt::NoPen);
+    p.setBrush(accent);
+    const qreal markerHeight = r.height() - 18;
+    p.drawRoundedRect(QRectF(r.left() + 5, r.center().y() - markerHeight / 2.0 + 0.5, MarkerWidth, markerHeight), MarkerWidth / 2.0,
+                      MarkerWidth / 2.0);
+    p.restore();
+}
+
+void ResultList::paintEvent(QPaintEvent *event)
+{
+    if (m_slide.isRunning() && !m_capturing) {
+        // The content slides in as one picture, drawn offset and faded.
+        // Until the picture is taken (right after this event) there is
+        // nothing to draw: the content is still transparent at this point.
+        if (m_slidePicture.isNull()) {
+            scheduleCapture();
+            return;
+        }
+        const qreal t = m_slide.value();
+        QPointF offset;
+        switch (m_reveal) {
+        case FromRight:
+            offset.setX((1 - t) * SlideDistance);
+            break;
+        case FromLeft:
+            offset.setX(-(1 - t) * SlideDistance);
+            break;
+        case FromBelow:
+            offset.setY((1 - t) * SlideDistance * 0.6);
+            break;
+        case FadeIn:
+            break;
+        }
+        QPainter p(viewport());
+        p.setOpacity(t);
+        p.drawPixmap(offset, m_slidePicture);
+        return;
+    }
+    if (!m_capturing)
+        m_slidePicture = QPixmap(); // the slide is over
+    m_highlightShown = currentIndex().isValid();
+    if (m_highlightShown) {
+        m_drawn = currentHighlight();
+        QPainter p(viewport());
+        paintHighlight(p, m_drawn);
+    }
+    QListView::paintEvent(event);
 }

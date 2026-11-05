@@ -37,6 +37,12 @@ add_library(lumen-core STATIC
     src/browserhistory.cpp
     src/calchistory.cpp
     src/theme.cpp
+    src/packages.cpp
+    src/appquit.cpp
+    src/language.cpp
+    src/network.cpp
+    src/keepawake.cpp
+    src/devices.cpp
     src/outputview.cpp
     src/scriptcommands.cpp
     src/resultview.cpp
